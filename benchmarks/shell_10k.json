@@ -1,0 +1,23 @@
+{
+  "mesh": "benchmarks/shell_10k.obj",
+  "material": {
+    "bending_model": "DiscreteShellBending",
+    "youngs_modulus_pa": 100000,
+    "poisson_ratio": 0.25,
+    "density_kg_m3": 360,
+    "thickness_m": 0.00025,
+    "bending_rigidity_nm": 5e-8,
+    "self_friction": 0.4
+  },
+  "dt": 0.005,
+  "gravity": [
+    0,
+    0,
+    -9.81
+  ],
+  "pins": [],
+  "forces": [],
+  "body_type": "shell",
+  "tet_max_volume_m3": -1,
+  "contact_d_hat_m": 0.0005
+}
