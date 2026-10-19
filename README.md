@@ -13,10 +13,14 @@
 - tet_max_volume_m3：-1 自动划分，正数指定最大四面体体积（m³），仅体积模式使用。正数会允许 TetGen 细分边界。
 - dt：每次 step 对应的时间（s）；子步数使用 Genesis 默认值 1。
 - gravity：三维重力（m/s²）。
-- material：youngs_modulus_pa、poisson_ratio、density_kg_m3、self_friction；薄壳另有 thickness_m、bending_model（DiscreteShellBending 或 null）、bending_rigidity_nm。
+- material：youngs_modulus_pa、poisson_ratio、density_kg_m3、self_friction；薄壳另有 thickness_m、shear_stiffness_n_m、bending_model（DiscreteShellBending 或 null）、bending_rigidity_nm。
 - pins：表面固定点编号；forces：[{"vertex":0,"vector":[0,0,0.001]}]，单位 N。
 
 薄壳材料绑定原生 Cloth / Baraff–Witkin；体积绑定原生 Elastic / IPC Stable Neo-Hookean。不再提供无实际作用的膜模型、体积模型或求解器选择。
+
+薄壳新增 `material.shear_stiffness_n_m`，默认 8 N/m，必须为正的有限数。它独立设置 BW 的二维剪切系数：越大越难斜切，不随 E、nu 或厚度自动联动，体积模式不使用。网页修改后点击「应用设置并重置」。拉伸、strain limiting、弯曲和求解精度保持原样。
+
+旧 JSON 缺省时也采用 8，会改变旧版效果；复现旧映射需显式填写原 E/[2(1+nu)] 的数值，本例为 40000。8 是调参起点，不是通用的真实材料标定值。剪切回归检查：`python -m unittest discover -s tests -v`；设置环境变量 `IPC_GPU_TEST=1` 可额外检查真实 CUDA 构建和步进。
 
 保留数学/物理要求和数据格式校验：正的刚度、密度、厚度、dt，0<nu<0.5，非负弯曲刚度与摩擦，有限数、三维向量、合法表面编号。删除人为设置的最大刚度、密度、厚度、点力、数量、时间步和重力范围，以及旧 elastic_moduli 兼容代码。Pydantic 在读取文件、保存配置、configure、更新点力或固定点时校验；推进时不重复校验配置。失败通过 HTTP 400 或 WebSocket error 返回，网页显示错误。
 

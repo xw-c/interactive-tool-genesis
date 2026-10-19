@@ -14,7 +14,7 @@ function buildForm(data){
  for(const [id,property] of Object.entries(data.material_schema.properties)){
   const number=property.type==='number'?property:property.anyOf?.find(x=>x.type==='number');if(!number)continue;
   fields.push(id);const label=document.createElement('label');label.textContent=property.title;label.dataset.field=id;
-  const input=document.createElement('input');Object.assign(input,{id,type:'number',step:'any'});
+  const input=document.createElement('input');Object.assign(input,{id,type:'number',step:'any',title:property.description??''});
   if(number.minimum!==undefined)input.min=number.minimum;if(number.maximum!==undefined)input.max=number.maximum;
   input.oninput=()=>$('dirty').textContent='有未应用的参数修改。';label.append(input);$('material-fields').append(label);
  }
@@ -29,7 +29,7 @@ function showContactCheck(check){
 }
 function updateMaterialFields(){
  const volume=$('body_type').value==='volume';
- for(const id of fields)$(id).parentElement.hidden=volume&&['thickness_m','bending_rigidity_nm'].includes(id)||id==='bending_rigidity_nm'&&!$('bending_model').value;
+ for(const id of fields)$(id).parentElement.hidden=volume&&['thickness_m','bending_rigidity_nm','shear_stiffness_n_m'].includes(id)||id==='bending_rigidity_nm'&&!$('bending_model').value;
  $('bending_model').parentElement.hidden=volume;
  $('tet-options').hidden=!volume;
  $('model-name').textContent=projectSpec.models[$('body_type').value];

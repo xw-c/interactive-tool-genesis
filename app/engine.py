@@ -55,6 +55,7 @@ class GenesisEngine:
             body=c._ipc_objects.find(name)[0]
             for slot in c._ipc_scene.geometries().find(body.geometries().ids()[0]):
                 geometry=slot.geometry()
+                if self.config.body_type=='shell':self._configure_shell_material(geometry)
                 external_force.apply_to(geometry,np.zeros(3,dtype=np.float64))
                 fixed=geometry.vertices().find(uipc.builtin.is_fixed)
                 if fixed is None:fixed=geometry.vertices().create(uipc.builtin.is_fixed,0)
@@ -67,6 +68,13 @@ class GenesisEngine:
             c._ipc_scene.animator().insert(body,animate)
             self._animate=animate
         c._add_fem_entities_to_ipc=MethodType(add_inputs,c)
+
+    def _configure_shell_material(self,geometry):
+        # BW expects an independent 2D shear coefficient, not Genesis's shared Pa modulus.
+        import uipc
+        shear=geometry.triangles().find('mu')
+        if shear is None:raise RuntimeError('原生薄壳缺少 mu 属性，无法设置剪切刚度，需要更新适配')
+        uipc.view(shear)[:]=self.config.material.shear_stiffness_n_m
 
     def set_forces(self,forces):
         forces=[Force.model_validate(f) for f in forces]

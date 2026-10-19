@@ -9,6 +9,7 @@ class Material(Input):
     bending_model: Literal['DiscreteShellBending'] | None='DiscreteShellBending'
     youngs_modulus_pa: PositiveFloat=Field(100000.,title='杨氏模量 / Pa')
     poisson_ratio: float=Field(.25,gt=0,lt=.5,title='泊松比')
+    shear_stiffness_n_m: PositiveFloat=Field(8.,title='剪切刚度 / N·m⁻¹',description='仅薄壳：控制材料方向的夹角变化。独立二维系数；越大越难斜切，不随 E、泊松比或厚度自动变化。经验参考：可取拉伸系数的约 0.3 倍作为调参起点，不是固定物理关系。')
     density_kg_m3: PositiveFloat=Field(360.,title='密度 / kg·m⁻³')
     thickness_m: PositiveFloat=Field(.00025,title='实际厚度 / m')
     bending_rigidity_nm: float=Field(5e-8,ge=0,title='弯曲刚度 / N·m')
