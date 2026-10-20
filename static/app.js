@@ -31,6 +31,7 @@ function updateMaterialFields(){
  const volume=$('body_type').value==='volume';
  for(const id of fields)$(id).parentElement.hidden=volume&&['thickness_m','bending_rigidity_nm','shear_stiffness_n_m'].includes(id)||id==='bending_rigidity_nm'&&!$('bending_model').value;
  for(const id of ['bending_plasticity','bending_yield_angle_deg','bending_plastic_hardening'])$(id).parentElement.hidden=volume||!$('bending_model').value||(id!=='bending_plasticity'&&!$('bending_plasticity').checked);
+ for(const id of ['volume_plasticity','volume_yield_strain_percent','volume_plastic_hardening'])$(id).parentElement.hidden=!volume||(id!=='volume_plasticity'&&!$('volume_plasticity').checked);
  $('bending_model').parentElement.hidden=volume;
  $('tet-options').hidden=!volume;
  $('model-name').textContent=projectSpec.models[$('body_type').value];

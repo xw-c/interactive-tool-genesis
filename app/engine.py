@@ -11,8 +11,11 @@ class GenesisEngine:
         # Both Genesis kernels and the independent IPC engine use CUDA.
         if not gs._initialized:gs.init(backend=gs.cuda,precision='64',logging_level='warning')
         if gs.backend!=gs.cuda:raise RuntimeError('本工具要求 Genesis CUDA 后端，请在新进程中使用 gs.cuda 初始化')
-        self.config=config;self.time=0.;self.frame=0;self.step_ms=0.
+        self.config=config;self.time=0.;self.frame=0;self.step_ms=0.;self._failed=False
         m=config.material;shell=config.body_type=='shell'
+        if not shell and m.volume_plasticity:
+            from .plasticity import require_volume_backend
+            require_volume_backend()
         self.scene=gs.Scene(sim_options=gs.options.SimOptions(dt=config.dt,gravity=config.gravity),
             coupler_options=gs.options.IPCCouplerOptions(contact_d_hat=config.contact_d_hat_m),show_viewer=False)
         try:
@@ -62,6 +65,9 @@ class GenesisEngine:
             for slot in c._ipc_scene.geometries().find(body.geometries().ids()[0]):
                 geometry=slot.geometry()
                 if self.config.body_type=='shell':self._configure_shell_material(geometry)
+                elif m.volume_plasticity:
+                    from .plasticity import configure_volume
+                    configure_volume(geometry,m)
                 if plastic_bending is not None:
                     plastic_bending.apply_to(geometry,m.bending_rigidity_nm,
                         np.deg2rad(m.bending_yield_angle_deg),m.bending_plastic_hardening)
@@ -97,9 +103,19 @@ class GenesisEngine:
         return self.state()
 
     def step(self):
-        start=time.perf_counter();self.scene.step()
-        self.x=self.entity.get_state().pos.detach().cpu().numpy().reshape(-1,3)[self.surface_ids]
-        if not np.isfinite(self.x).all():raise RuntimeError('Genesis 返回非有限状态，请检查材料或时间步')
+        if self._failed:raise RuntimeError('上一步模拟失败，请重置后再运行')
+        start=time.perf_counter()
+        try:
+            world=self.scene.sim.coupler._ipc_world
+            if not world.is_valid():raise RuntimeError('IPC 状态无效，请重置后再运行')
+            self.scene.step()
+            if not world.is_valid():raise RuntimeError('IPC 求解失败，请重置后再运行；详见后端日志')
+            positions=self.entity.get_state().pos.detach().cpu().numpy().reshape(-1,3)[self.surface_ids]
+            if not np.isfinite(positions).all():raise RuntimeError('Genesis 返回非有限状态，请检查材料或时间步并重置')
+        except Exception:
+            self._failed=True
+            raise
+        self.x=positions
         self.time+=self.config.dt;self.frame+=1;self.step_ms=(time.perf_counter()-start)*1000
         return self.state()
 

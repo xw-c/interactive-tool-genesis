@@ -1,0 +1,128 @@
+SNK1 体积塑性 v2：模型、离散更新与实现范围
+========================================
+
+这是一份与 native/plasticity.h 对应的模型说明。模型是下面明确写出的
+SNK1 + 关联 J2 + 线性各向同性硬化，不是把旧的应变截断改名。
+
+主要参考
+--------
+M. Ortiz, L. Stainier (1999), The variational formulation of viscoplastic
+constitutive updates, CMAME 171(3-4), 419-444.
+DOI: https://doi.org/10.1016/S0045-7825(98)00219-9
+作者机构条目: https://authors.library.caltech.edu/records/tdt3n-82b63
+参考其中“用增量势构造本构更新”的框架；下面的 SNK1、J2 和指数映射
+特化由本项目推导，不能当成该论文的一份逐公式复现。
+
+J.C. Simo (1992), Algorithms for static and dynamic multiplicative plasticity
+that preserve the classical return mapping schemes of the infinitesimal theory,
+CMAME 99(1), 61-112.
+DOI: https://doi.org/10.1016/0045-7825(92)90123-2
+用于理解乘法分解、有限变形返回映射和塑性不可压缩。
+
+J.C. Simo, R.L. Taylor (1985), Consistent tangent operators for rate-independent
+elastoplasticity, CMAME 48(1), 101-118.
+DOI: https://doi.org/10.1016/0045-7825(85)90070-2
+用于理解为什么 Newton 的切线必须是实际离散返回算法的导数。
+
+1. 状态与能量
+-------------
+F = Fe Fp，记录 A=Fp^{-1}，初始 A=I。
+每个四面体另有 alpha>=0，记录累计等效塑性形变，而不是当前残留形状大小。
+塑性约束 det(Fp)=1；实际总变形仍可发生弹性体积变化。
+
+保留原有 SNK1 弹性能量（参考体积密度，单位 Pa）：
+W(Fe) = mu/2 (||Fe||²-3) + lambda/2 (Je-1)² - mu(Je-1).
+硬化储能: Wh(alpha)=H alpha²/2。
+塑性耗散: 每次增加 Delta_alpha，对应 Y0 Delta_alpha >= 0。
+Y0 和 H 的单位都是 Pa；H>=0，仅线性各向同性硬化。
+原生 lambda/mu 与名义 E/nu 继续沿用现有映射，不在此修改。
+
+2. 当前步局部返回
+-----------------
+整个时间步的 Newton/线搜索中固定已提交历史 A_old、alpha_old。
+对每一个试探 F，计算 T=F A_old，C=T^T T=V diag(c_i) V^T。
+只接受 det(T)>0 且 c_i>0 的塑性域；坏单元不能成为新自然状态。
+
+令 B 为三维无迹子空间的一组正交基：
+B = [[1/sqrt(2), 1/sqrt(6)],
+     [-1/sqrt(2), 1/sqrt(6)],
+     [0, -2/sqrt(6)]]。
+塑性对数增量 d=B z，sum(d_i)=0，k=sqrt(2/3)。
+Delta_alpha=k ||z||，新弹性主伸长平方为 c_i exp(-2d_i)。
+
+求下述严格凸的二维局部最小值：
+phi(z) = mu/2 sum_i[c_i exp(-2(Bz)_i)]
+       + (Y0+H alpha_old) k ||z|| + H k² ||z||²/2。
+J 不受 d 影响，因此 SNK1 的体积项不进入这个局部最小化。
+
+z=0 是否为最小值可直接由应力判断：
+s_trial = mu dev(c)，sigma_eq_trial = sqrt(3/2)||s_trial||。
+若 sigma_eq_trial <= Y0+H alpha_old，不发生塑性。
+否则用局部 Newton + Armijo 线搜索求 z；没有用径向应变截断替代。
+
+最优条件给出：
+mu dev(c_return) = k (Y0+H alpha_new) d / ||d||，
+sigma_eq_return = Y0+H alpha_new。
+这就是选定 Mandel/Kirchhoff 等效应力下的 J2 屈服一致性。
+对各向同性弹性，Mandel 与 Kirchhoff 的主值相同。
+这里不是 Cauchy 应力阈值；Je!=1 时不能把两种应力混为一谈。
+
+采用指数更新：
+Fp_new = V diag(exp(d)) V^T Fp_old，
+A_new = A_old V diag(exp(-d)) V^T，
+alpha_new = alpha_old + Delta_alpha。
+离散流动方向来自返回后的应力，不是试探对数应变的方向。
+
+3. Newton 使用的增量势与切线
+---------------------------
+Q(F;history_old) = W(Fe_return)
+                 + Y0 Delta_alpha
+                 + H/2 (alpha_new²-alpha_old²)。
+它是一个时间步的增量势，不是只含可回弹部分的储能 W。
+由同一个 Q 计算能量、梯度和 Hessian，保证线搜索评估与内力一致。
+
+局部 z 求解后，通过 Schur 补消去局部自由度：
+Q_CC = L_CC - L_Cz (L_zz)^{-1} L_zC。
+再通过 C=T^T T 的谱导数与链式法则得到 dP/dT，继而由 A_old 和
+参考四面体矩阵装配到顶点自由度。重复主值采用解析极限，不除以零。
+它不是把返回后的 Fe 代入旧弹性 Hessian。
+现有全局求解器仍会对装配用 Hessian 做 make_spd；测试检查的是投影前
+一致切线，不能宣称实际全局求解始终保持纯 Newton 的二次收敛。
+
+Newton/线搜索内的试探求值不修改历史。线搜索失败或 Newton 达到迭代上限
+（包括 strict=0）时，在 TimeIntegrator::update_state 之前报告失败；接受的
+时间步才重新计算局部最优解并提交。沿用求解器已有的半隐式终止准则，
+这不等价于每步都求到完整 Newton 收敛。失败后必须重置场景；不提供
+整帧位置、速度和历史的事务回滚，也不支持从失败状态直接重试。
+原生 dump/recover 保存 A 和 alpha；网页 JSON 仍只保存参数。
+
+4. 为什么旧 q 有 sqrt(2/3)
+-------------------------
+旧 q=sqrt(2/3)||dev(log(sigma(Fe)))|| 是等效弹性对数应变，
+不是累计塑性量。系数的用途是归一化：等体积单轴拉伸的主对数应变
+(a,-a/2,-a/2) 代入后 q=|a|。
+新模型不再拿旧 q 直接裁切；屈服判断使用 sigma_eq。
+
+为保留已有建模师接口，参考屈服形变 r=percent/100 换算为 Y0=3mu*r，
+界面硬化 h 换算为 H=3mu*h。这是小弹性应变的参考换算，不是 SNK1
+大变形下的精确应变阈值；修改 E 会同时改变此参考接口下的应力阈值。
+需要指定应力 Y0 时可用 percent=100*Y0/(3mu)，mu 是实际原生系数。
+
+屈服不是残留量上限：纯弹性卸载后 Fe 可以回到零偏应变，而 Fp 保留。
+alpha 是累计路径长度，反向折回来也可能继续增大，不等于当前外观变形。
+
+5. 范围
+-------
+提供：等温、各向同性、率无关、等体积、关联 J2、线性各向同性硬化；
+指数离散更新、逐试探返回、解析一致切线、原生状态提交与恢复。
+不提供：黏塑性/蠕变、永久体积压实、运动硬化、损伤、断裂、热耦合、
+各向异性与自适应重网格。固定四面体大塑性后仍会发生网格质量问题。
+有限时间步的指数积分仍有误差，不能称为任意加载路径精确解。
+模型是明确的理想化 J2 材料，不是已经按真实果冻/橡胶标定的模型。
+
+6. 验证入口
+-----------
+native/test_plasticity.cu: 局部屈服、硬化、不可压缩、客观性，增量势的一阶
+与二阶导数有限差分，重复主值、剪切与循环非同轴历史，以及真实 CUDA。
+benchmarks/plasticity.py: 四面体整体加载—松开控制。
+后续验证结果及时间步对照见 runtime/volume-plasticity-v2/ 中的报告。
