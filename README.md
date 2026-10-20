@@ -6,6 +6,9 @@
 
 ## 配置
 
+调参速查：[参数指南](static/parameter-guide.html)。启动后点击网页右上角「调参说明」，查看各参数的直观效果、建议试值和折痕验证步骤。
+
+
 薄壳和体积软体均绑定 Genesis IPC。Genesis 使用 gs.cuda，IPC 使用独立 CUDA 引擎；要求 CUDA 版 PyTorch 和可用 NVIDIA GPU，无法使用 CUDA 时直接报错，不回退 CPU。OBJ/TetGen 预处理、Python 输入整理、网页通信和结果取回仍包含 CPU 工作。
 
 - body_type：shell 或 volume。

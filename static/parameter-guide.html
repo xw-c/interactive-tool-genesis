@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>软体工具 · 调参说明</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1119;--panel:#14212e;--border:#304456;--text:#e0e8ef;--muted:#a7b8c7;--accent:#65dec6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.85 "Segoe UI","Microsoft YaHei",sans-serif}main{max-width:1050px;margin:auto;padding:35px 28px 80px}a{color:var(--accent)}h1{font-size:29px}h2{margin-top:45px;font-size:22px;border-bottom:1px solid var(--border);padding-bottom:8px}h3{margin-top:26px}p{margin:10px 0}code{font:13px/1.6 Consolas,monospace;overflow-wrap:anywhere;color:#b7e7ee}table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:12px;border:1px solid var(--border);vertical-align:top;text-align:left}th{background:var(--panel)}.table{overflow-x:auto}td:first-child{min-width:165px}small,.muted{color:var(--muted)}.note{border-left:3px solid var(--accent);background:var(--panel);padding:14px 18px;margin:20px 0}nav{display:flex;gap:10px 22px;flex-wrap:wrap}li{margin:8px 0}details{border:1px solid var(--border);padding:12px 16px;margin:12px 0}summary{cursor:pointer;color:var(--accent)}@media(max-width:650px){main{padding:20px 15px}table{min-width:750px}}@media print{body{background:white;color:black;font-size:11px}a,code,.muted,small{color:inherit}main{max-width:none;padding:0}th,.note{background:#eee}details{break-inside:avoid}nav{display:none}}
+</style></head>
+<body><main>
+<a href="/">← 返回工具</a><h1>调参说明</h1>
+<p>先用默认值跑起来。哪里不对，就调对应的参数；每次只改一个。</p>
+
+<h2>软硬与形变</h2>
+<div class="table"><table><thead><tr><th>参数</th><th>它管什么</th><th>怎么调</th></tr></thead><tbody>
+<tr><td>杨氏模量 E</td><td>薄壳有多难拉长；体积软体有多难捏。</td><td>太软就加大，太硬就减小。先试当前值的 0.5 倍、2 倍。</td></tr>
+<tr><td>剪切刚度<br>仅薄壳</td><td>薄片有多难被斜着拉歪。</td><td>想容易斜切就减小。可以试 2、8、32 N/m，沿薄片平面横向拉着看。</td></tr>
+<tr><td>弯曲刚度<br>仅薄壳</td><td>薄片有多难折弯。</td><td>想更挺就加大，想更柔软就减小。先试乘 10 或除 10；它不改变拉伸刚度。</td></tr>
+<tr><td>弯曲模型<br>仅薄壳</td><td>是否计算弯曲抵抗。</td><td>通常保留 DiscreteShellBending。选「无弯曲能」后，折痕塑性也不起作用。</td></tr>
+<tr><td>泊松比</td><td>体积软体受压时，是缩小体积还是向旁边鼓。</td><td>越接近 0.5 越抗体积变化，也可能越难算。先试 0.3、0.45，不能填 0.5。</td></tr>
+<tr><td>厚度<br>仅薄壳</td><td>质量、抗拉伸程度和接触厚度。</td><td>按实际尺寸填：1 mm = 0.001 m。加厚不会自动增加这里单独设置的弯曲、剪切刚度。</td></tr>
+<tr><td>密度</td><td>重量和惯性。</td><td>加大后更重，同样点力下加速更慢；有重力时更容易下垂。先保持不动，别拿它调软硬。</td></tr>
+<tr><td>摩擦</td><td>接触后有多容易滑。</td><td>想滑就减小，想不滑就加大。试 0、0.4、1；空中运动不受它影响。</td></tr>
+</tbody></table></div>
+<p><strong>想难拉，改 E；想难斜切，改剪切；想难折，改弯曲。</strong>这三个不是同一个“硬度”。</p>
+
+<h2>塑性：松手后留下折痕</h2>
+<div class="table"><table><thead><tr><th>参数</th><th>怎么调</th></tr></thead><tbody>
+<tr><td>启用永久折痕</td><td>勾选才会留痕。目前薄壳只支持永久折弯，不支持永久拉长或斜切。</td></tr>
+<tr><td>屈服折角</td><td><strong>越小越容易留痕。</strong>先试 2°、10°、30°。它看的是相邻三角形的折角，换更细的网格后可能要调低。</td></tr>
+<tr><td>折痕硬化</td><td>先用 0。想让后续越来越难继续留下新折痕，再试 0.1、1。它提高后续屈服门槛，不增加弹性弯曲刚度。</td></tr>
+</tbody></table></div>
+<p>例如：屈服角 10°、硬化 0，理想地折到 40°后松开，约有 30° 被记成自然折角。实际形状还会受重力、接触影响。<strong>屈服角设 0 是一折就允许留痕，不是关闭塑性。</strong></p>
+
+<h2>模型与仿真</h2>
+<div class="table"><table><thead><tr><th>设置</th><th>怎么用</th></tr></thead><tbody>
+<tr><td>软体类型</td><td>薄片选薄壳，实心物体选体积。切换后点应用，材料参数不会自动换一套。</td></tr>
+<tr><td>OBJ 模型</td><td>单位是米：20 cm = 0.2。体积模型要封闭。模型尺寸错了，先修尺寸，别靠调刚度补。</td></tr>
+<tr><td>最大四面体体积</td><td>仅体积。先用 −1 自动划分；填正值时，越小通常越细、越慢。划分改变后重新确认顶点编号。</td></tr>
+<tr><td>时间步</td><td>先用 0.005 s。看快速回弹可试 0.001 s，但同样时长要跑 5 倍帧数。比较时保持加载时长一致。</td></tr>
+<tr><td>重力 Z</td><td>−9.81 向下，0 关闭。测折痕先关重力，避免把下垂误认为没有塑性。</td></tr>
+<tr><td>接触激活距离</td><td>默认 0.0005 m。太大可能隔空排斥、显得变硬；太小也可能难算。结合页面的网格尺度预警调整。</td></tr>
+<tr><td>固定点</td><td>先固定再施力。修改固定点会重置模型，清除已有折痕。</td></tr>
+<tr><td>点力 Fx、Fy、Fz</td><td>单位 N，世界坐标，Z 正值向上。是持续施力，不是拖到某个位置。同一点重复添加会叠加；单点大力容易拉出尖角。</td></tr>
+</tbody></table></div>
+
+<h2>直接试一次折痕</h2>
+<ol><li>导入 <code>benchmarks/shell_plasticity/plastic.json</code>，固定点和外力已配好。</li><li>单步 20 次，点击外力「全部清除」，再点开始。</li><li>这个例子实测保留约 23.4° 折痕。换成同目录 <code>elastic.json</code>，相同操作会恢复平面。</li></ol>
+<p><strong>调参数后点「应用设置并重置」；松手只清除外力。</strong>重置、重新导入和改固定点都会清除折痕。JSON 保存参数，OBJ 保存表面形状，都不是完整仿真存档。</p>
+<details><summary>体积塑性实验参数</summary><p>当前未提交，需要扩展后端。开启后，屈服形变越小越容易留下永久形状，可试 5、10、20%；这是等效应变，不是体积压缩比例。硬化先用 0，想让后续更难留下新形变再加大。尚未做真实材料标定。</p></details>
+<p class="muted">试值用于比较效果，不是通用材料参数。</p>
+</main></body></html>
