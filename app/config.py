@@ -7,6 +7,9 @@ class Input(BaseModel):
 
 class Material(Input):
     bending_model: Literal['DiscreteShellBending'] | None='DiscreteShellBending'
+    bending_plasticity: bool=Field(False,title='启用永久折痕',description='仅薄壳弯曲：超过屈服折角后留下折痕；不包含永久拉伸或剪切。重置会清除折痕。')
+    bending_yield_angle_deg: float=Field(10.,ge=0,le=180,title='屈服折角 / 度',description='相邻三角形相对当前无应力折角还能弹性转动的角度。越小越容易留下折痕；该参数与网格细密程度有关。')
+    bending_plastic_hardening: float=Field(0.,ge=0,title='折痕硬化',description='0：保持同样容易折；正值：每积累 1 度塑性折角，屈服折角增加这么多度。')
     youngs_modulus_pa: PositiveFloat=Field(100000.,title='杨氏模量 / Pa')
     poisson_ratio: float=Field(.25,gt=0,lt=.5,title='泊松比')
     shear_stiffness_n_m: PositiveFloat=Field(8.,title='剪切刚度 / N·m⁻¹',description='仅薄壳：控制材料方向的夹角变化。独立二维系数；越大越难斜切，不随 E、泊松比或厚度自动变化。经验参考：可取拉伸系数的约 0.3 倍作为调参起点，不是固定物理关系。')

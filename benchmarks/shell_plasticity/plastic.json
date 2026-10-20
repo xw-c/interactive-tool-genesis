@@ -1,0 +1,40 @@
+{
+  "mesh": "benchmarks/shell_plasticity/hinge.obj",
+  "body_type": "shell",
+  "tet_max_volume_m3": -1,
+  "material": {
+    "bending_model": "DiscreteShellBending",
+    "bending_plasticity": true,
+    "bending_yield_angle_deg": 10,
+    "bending_plastic_hardening": 0,
+    "youngs_modulus_pa": 10000,
+    "poisson_ratio": 0.25,
+    "shear_stiffness_n_m": 8,
+    "density_kg_m3": 1000,
+    "thickness_m": 0.001,
+    "bending_rigidity_nm": 0.01,
+    "self_friction": 0.4
+  },
+  "contact_d_hat_m": 1e-05,
+  "dt": 0.005,
+  "gravity": [
+    0,
+    0,
+    0
+  ],
+  "pins": [
+    0,
+    1,
+    2
+  ],
+  "forces": [
+    {
+      "vertex": 3,
+      "vector": [
+        0,
+        0,
+        0.5
+      ]
+    }
+  ]
+}

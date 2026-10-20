@@ -24,6 +24,20 @@
 
 保留数学/物理要求和数据格式校验：正的刚度、密度、厚度、dt，0<nu<0.5，非负弯曲刚度与摩擦，有限数、三维向量、合法表面编号。删除人为设置的最大刚度、密度、厚度、点力、数量、时间步和重力范围，以及旧 elastic_moduli 兼容代码。Pydantic 在读取文件、保存配置、configure、更新点力或固定点时校验；推进时不重复校验配置。失败通过 HTTP 400 或 WebSocket error 返回，网页显示错误。
 
+## 薄壳折痕塑性（默认关闭）
+
+material.bending_plasticity 启用原生 StrainPlasticDiscreteShellBending，替换普通弹性弯曲，不叠加两份能量。bending_yield_angle_deg 为相邻三角形相对当前自然折角的屈服阈值（度），默认 10；bending_plastic_hardening 默认 0，表示不硬化，正值表示每积累 1 度塑性折角时阈值增加多少度。0 度阈值表示无弹性屈服范围，关闭塑性须使用开关。
+
+仅提供永久弯曲，不包含永久拉伸或剪切；无弯曲模型时折痕参数不参与计算。阈值依赖网格，10 度是演示起点而非真实材料标定。旧配置默认关闭。应用参数、重置或修改固定点会清空折痕历史；JSON 只保存参数，OBJ 只保存表面位置，均不保存完整塑性状态。
+
+直接使用现有 pyuipc，无需自定义 CUDA 扩展。可导入的折页塑性／弹性配置、模型及操作步骤见 [benchmarks/shell_plasticity/README.md](benchmarks/shell_plasticity/README.md)。自动执行相同点力加载—松开实验：
+
+```powershell
+python -m benchmarks.shell_plasticity
+```
+
+结果写入 runtime/shell-plasticity/。默认验证弹性、塑性、高阈值及硬化。设置 IPC_GPU_TEST=1 后运行 tests/test_shell_plasticity.py，可执行原生 CUDA 回归。
+
 ## 表面与体积
 
 volume 输入必须封闭并有一致的朝外法线，Genesis 自动调用 TetGen 生成内部四面体。shell 直接使用三角形。

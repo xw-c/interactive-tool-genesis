@@ -19,7 +19,7 @@ class GenesisEngine:
             self.scene.add_entity(gs.morphs.Plane(),material=gs.materials.Rigid(coup_friction=m.self_friction))
             common=dict(E=m.youngs_modulus_pa,nu=m.poisson_ratio,rho=m.density_kg_m3,friction_mu=m.self_friction)
             material=gs.materials.FEM.Cloth(**common,thickness=m.thickness_m/2,
-                bending_stiffness=m.bending_rigidity_nm if m.bending_model else None) if shell else gs.materials.FEM.Elastic(**common)
+                bending_stiffness=m.bending_rigidity_nm if m.bending_model and not m.bending_plasticity else None) if shell else gs.materials.FEM.Elastic(**common)
             self.entity=self.scene.add_entity(gs.morphs.Mesh(file=str(mesh_path(config.mesh)),decimate=False,
                 maxvolume=config.tet_max_volume_m3 if not shell else -1,
                 nobisect=shell or config.tet_max_volume_m3==-1),material=material)
@@ -51,11 +51,20 @@ class GenesisEngine:
             original()
             external_force=FiniteElementExternalForce()
             c._ipc_constitution_tabular.insert(external_force)
+            plastic_bending=None
+            m=self.config.material
+            if self.config.body_type=='shell' and m.bending_plasticity and m.bending_model:
+                from uipc.constitution import StrainPlasticDiscreteShellBending
+                plastic_bending=StrainPlasticDiscreteShellBending()
+                c._ipc_constitution_tabular.insert(plastic_bending)
             name=('cloth' if self.config.body_type=='shell' else 'fem')+'_0_0'
             body=c._ipc_objects.find(name)[0]
             for slot in c._ipc_scene.geometries().find(body.geometries().ids()[0]):
                 geometry=slot.geometry()
                 if self.config.body_type=='shell':self._configure_shell_material(geometry)
+                if plastic_bending is not None:
+                    plastic_bending.apply_to(geometry,m.bending_rigidity_nm,
+                        np.deg2rad(m.bending_yield_angle_deg),m.bending_plastic_hardening)
                 external_force.apply_to(geometry,np.zeros(3,dtype=np.float64))
                 fixed=geometry.vertices().find(uipc.builtin.is_fixed)
                 if fixed is None:fixed=geometry.vertices().create(uipc.builtin.is_fixed,0)

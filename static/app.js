@@ -12,11 +12,11 @@ function buildForm(data){
  for(const entry of data.models.bending_model){const option=document.createElement('option');option.value=entry.value??'';option.textContent=entry.label;select.append(option);}
  select.onchange=updateMaterialFields;label.append(select);$('model-fields').append(label);
  for(const [id,property] of Object.entries(data.material_schema.properties)){
-  const number=property.type==='number'?property:property.anyOf?.find(x=>x.type==='number');if(!number)continue;
+  const number=property.type==='number'?property:property.anyOf?.find(x=>x.type==='number');const boolean=property.type==='boolean';if(!number&&!boolean)continue;
   fields.push(id);const label=document.createElement('label');label.textContent=property.title;label.dataset.field=id;
-  const input=document.createElement('input');Object.assign(input,{id,type:'number',step:'any',title:property.description??''});
-  if(number.minimum!==undefined)input.min=number.minimum;if(number.maximum!==undefined)input.max=number.maximum;
-  input.oninput=()=>$('dirty').textContent='有未应用的参数修改。';label.append(input);$('material-fields').append(label);
+  const input=document.createElement('input');Object.assign(input,{id,type:boolean?'checkbox':'number',step:'any',title:property.description??''});
+  if(number?.minimum!==undefined)input.min=number.minimum;if(number?.maximum!==undefined)input.max=number.maximum;
+  input.oninput=()=>{$('dirty').textContent='有未应用的参数修改。';updateMaterialFields();};label.append(input);$('material-fields').append(label);
  }
  $('mesh-info').textContent=data.mesh.file+' · '+data.mesh.vertices+' 顶点 / '+data.mesh.triangles+' 三角形';
  showContactCheck(data.contact_check);
@@ -30,6 +30,7 @@ function showContactCheck(check){
 function updateMaterialFields(){
  const volume=$('body_type').value==='volume';
  for(const id of fields)$(id).parentElement.hidden=volume&&['thickness_m','bending_rigidity_nm','shear_stiffness_n_m'].includes(id)||id==='bending_rigidity_nm'&&!$('bending_model').value;
+ for(const id of ['bending_plasticity','bending_yield_angle_deg','bending_plastic_hardening'])$(id).parentElement.hidden=volume||!$('bending_model').value||(id!=='bending_plasticity'&&!$('bending_plasticity').checked);
  $('bending_model').parentElement.hidden=volume;
  $('tet-options').hidden=!volume;
  $('model-name').textContent=projectSpec.models[$('body_type').value];
@@ -84,13 +85,13 @@ function readConfig(){
  for(const input of document.querySelectorAll('.left input[type=number]')){if(input.parentElement.hidden)continue;if(!input.checkValidity()||input.value==='')throw Error('请填写有效参数：'+input.parentElement.textContent);}
  const material={...config?.material};
  material.bending_model=$('bending_model').value||null;
- for(const id of fields)if(!$(id).parentElement.hidden)material[id]=+$(id).value;
+ for(const id of fields)if(!$(id).parentElement.hidden)material[id]=$(id).type==='checkbox'?$(id).checked:+$(id).value;
  return {...config,mesh:config.mesh,body_type:$('body_type').value,tet_max_volume_m3:+$('tet_max_volume_m3').value,material,contact_d_hat_m:+$('contact_d_hat_m').value,dt:+$('dt').value,gravity:[config.gravity[0],config.gravity[1],+$('gravity').value],pins:[...pins],forces:structuredClone(forces)};
 }
 function fillConfig(c){
  config=structuredClone(c);$('body_type').value=c.body_type;
  $('bending_model').value=c.material.bending_model??'';
- for(const id of fields)$(id).value=c.material[id]??projectSpec.material_schema.properties[id].default;
+ for(const id of fields){const value=c.material[id]??projectSpec.material_schema.properties[id].default;if($(id).type==='checkbox')$(id).checked=value;else $(id).value=value;}
  $('tet_max_volume_m3').value=c.tet_max_volume_m3??-1;
  $('contact_d_hat_m').value=c.contact_d_hat_m??.0005;
  $('dt').value=c.dt;$('gravity').value=c.gravity[2];updateMaterialFields();
