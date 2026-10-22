@@ -1,30 +1,41 @@
 {
   "mesh": "model.obj",
-  "body_type": "shell",
+  "body_type": "volume",
+  "step_mode": "libuipc",
+  "contact_mode": "ground_only",
   "tet_max_volume_m3": -1,
   "material": {
     "bending_model": "DiscreteShellBending",
     "bending_plasticity": false,
-    "bending_yield_angle_deg": 10.0,
-    "bending_plastic_hardening": 0.0,
+    "bending_yield_angle_deg": 10,
+    "bending_plastic_hardening": 0,
     "volume_plasticity": false,
-    "volume_yield_strain_percent": 10.0,
-    "volume_plastic_hardening": 0.0,
-    "youngs_modulus_pa": 100000.0,
-    "poisson_ratio": 0.25,
-    "shear_stiffness_n_m": 8.0,
-    "density_kg_m3": 360.0,
+    "volume_yield_strain_percent": 10,
+    "volume_plastic_hardening": 0,
+    "youngs_modulus_pa": 5000,
+    "poisson_ratio": 0.45,
+    "shear_stiffness_n_m": 8,
+    "density_kg_m3": 1050,
     "thickness_m": 0.00025,
     "bending_rigidity_nm": 5e-08,
-    "self_friction": 0.4
+    "self_friction": 0
   },
-  "contact_d_hat_m": 0.0005,
-  "dt": 0.005,
+  "contact_d_hat_m": 5e-05,
+  "dt": 0.016666666666666666,
   "gravity": [
-    0.0,
-    0.0,
-    -9.81
+    0,
+    0,
+    0
   ],
   "pins": [],
-  "forces": []
+  "forces": [
+    {
+      "vertex": 623,
+      "vector": [
+        1.9418893717987595,
+        -1.574504896053048,
+        0.0
+      ]
+    }
+  ]
 }

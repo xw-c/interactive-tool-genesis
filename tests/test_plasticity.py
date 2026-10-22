@@ -62,17 +62,18 @@ class PlasticityTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 engine=GenesisEngine.__new__(GenesisEngine)
                 engine._failed=False;engine.frame=4;engine.time=.04;engine.step_ms=1.
-                engine.config=SimpleNamespace(dt=.01);engine.surface_ids=np.array([0])
+                engine.config=SimpleNamespace(dt=.01,step_mode='genesis_world');engine.surface_ids=np.array([0])
                 engine.x=np.array([[1.,2.,3.]])
                 world=Mock();world.is_valid.side_effect=[mode!='invalid_before',mode!='invalid_after']
                 scene=Mock();scene.sim.coupler._ipc_world=world;engine.scene=scene
                 if mode=='exception':scene.step.side_effect=RuntimeError('solver failure')
-                engine.entity=Mock()
-                engine.entity.get_state.return_value.pos.detach.return_value.cpu.return_value.numpy.return_value=np.array([[float('nan') if mode=='nonfinite' else 2.,3.,4.]])
+                engine._read_positions=Mock(return_value=np.array([[float('nan') if mode=='nonfinite' else 2.,3.,4.]]))
                 engine.state=Mock(return_value='accepted')
                 if mode=='success':
                     self.assertEqual(engine.step(),'accepted');self.assertEqual(engine.frame,5)
                     self.assertAlmostEqual(engine.time,.05);self.assertFalse(engine._failed)
+                    scene.step.assert_called_once()
+                    world.advance.assert_not_called();world.retrieve.assert_not_called()
                 else:
                     with self.assertRaises(RuntimeError):engine.step()
                     self.assertEqual(engine.frame,4);self.assertEqual(engine.time,.04)

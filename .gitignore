@@ -32,4 +32,9 @@ Thumbs.db
 *.swo
 *~
 
-# Keep OBJ meshes: these are required simulation inputs, not compiled objects.
+# Local working scene mesh (keep the file on disk).
+/model.obj
+
+# Local experiment scripts, reports and results. Existing tracked test fixtures
+# and legacy benchmark sources remain tracked unless explicitly untracked.
+/benchmarks/

@@ -22,6 +22,9 @@ os.environ.setdefault('NUMBA_CACHE_DIR',str(_runtime/'numba-existing-gpu'))
 # Select the optional complete plasticity package before importing Genesis/uipc.
 _selected=os.environ.get("INTERACTIVE_IPC_UIPC_PACKAGE")
 _default_package=_runtime/"plasticity-only/package"
+_optimized_package=_runtime/"mas-stream/package"
+if (_optimized_package/"mas-stream-validated.json").is_file():
+    _default_package=_optimized_package
 _package=Path(_selected).resolve() if _selected else _default_package
 if _selected or (_package/"plasticity-only-build-info.json").is_file():
     if not (_package/"uipc/__init__.py").is_file():

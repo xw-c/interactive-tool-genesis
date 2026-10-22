@@ -6,6 +6,18 @@ import numpy as np
 
 _backend=None
 
+
+def mas_supports_cuda_graph():
+    """Older MAS kernels ignore the supplied PCG capture stream."""
+    import uipc._native.pyuipc as native
+    name='uipc_backend_cuda.dll' if sys.platform=='win32' else 'libuipc_backend_cuda.so'
+    try:
+        library=ctypes.CDLL(str(Path(native.__file__).resolve().parent/name))
+        version=library.interactive_ipc_mas_stream_version
+        version.restype=ctypes.c_int
+        return version()==1
+    except (OSError,AttributeError):return False
+
 def require_volume_backend():
     global _backend
     if _backend is not None:return

@@ -25,6 +25,11 @@ def load_mesh(config):
 
 def contact_check(vertices,faces,config):
     """Linear-time local scale warning, not a full self-collision test."""
+    if config.contact_mode!='full':
+        scope=('已关闭全部接触：可穿过自身、地面和其他物体。' if config.contact_mode=='none' else
+            '仅保留地面接触：可穿过自身和其他物体，保留地面碰撞与摩擦。' if config.contact_mode=='ground_only' else
+            '已关闭同一软体的自碰撞；保留地面和其他物体接触，自身可穿透。')
+        return dict(warnings=[],enabled=False,scope=scope+' FEM 材料与受力求解保持原样；自接触尺度检查不适用。')
     triangles=np.asarray(vertices)[np.asarray(faces)]
     edges=np.linalg.norm(triangles-np.roll(triangles,1,axis=1),axis=2)
     double_area=np.linalg.norm(np.cross(triangles[:,1]-triangles[:,0],triangles[:,2]-triangles[:,0]),axis=1)

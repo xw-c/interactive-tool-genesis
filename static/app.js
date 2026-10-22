@@ -24,11 +24,14 @@ function buildForm(data){
 }
 function showContactCheck(check){
  if(!check)return;
- $('contact-note').textContent=check.warnings.length?'⚠ Warning：'+check.warnings.join(' '):'接触距离初始化尺度检查通过。';
+ $('contact-note').textContent=check.enabled===false?check.scope:check.warnings.length?'⚠ Warning：'+check.warnings.join(' '):'接触距离初始化尺度检查通过。';
  $('contact-note').title=check.scope;
 }
 function updateMaterialFields(){
  const volume=$('body_type').value==='volume';
+ const mode=$('contact_mode').value;
+ $('contact-options').hidden=mode==='none';
+ $('contact-mode-note').textContent=mode==='none'?'关闭全部接触：包括地面，软体可穿过自身和地面；材料、固定点和外力求解保留。':mode==='ground_only'?'仅保留地面碰撞与摩擦；关闭自身及其他物体接触，保留 FEM 材料求解。':mode==='no_self'?'关闭同一软体的自碰撞，保留地面与其他物体接触；材料求解保留。':'完整接触：解算自碰撞及与地面、其他物体的接触。各档均使用原有 FEM 材料求解。';
  for(const id of fields)$(id).parentElement.hidden=volume&&['thickness_m','bending_rigidity_nm','shear_stiffness_n_m'].includes(id)||id==='bending_rigidity_nm'&&!$('bending_model').value;
  for(const id of ['bending_plasticity','bending_yield_angle_deg','bending_plastic_hardening'])$(id).parentElement.hidden=volume||!$('bending_model').value||(id!=='bending_plasticity'&&!$('bending_plasticity').checked);
  for(const id of ['volume_plasticity','volume_yield_strain_percent','volume_plastic_hardening'])$(id).parentElement.hidden=!volume||(id!=='volume_plasticity'&&!$('volume_plasticity').checked);
@@ -41,7 +44,7 @@ let generation=0;let activeConfig=null;let lastFrameAt=null;
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error);}
 function playLabel(){lastFrameAt=null;$('play').textContent=playing?'Ⅱ 暂停':'▶ 开始';}
 function pause(){playing=false;playLabel();}
-function setBusy(b){busy=b;for(const id of ['apply','step','reset','import','body_type','contact_d_hat_m','tet_max_volume_m3','upload-obj','save-project','reload-project'])$(id).disabled=b;for(const id of ['bending_model',...fields]){if($(id))$(id).disabled=b;}}
+function setBusy(b){busy=b;for(const id of ['apply','step','reset','import','contact_mode','body_type','contact_d_hat_m','tet_max_volume_m3','upload-obj','save-project','reload-project'])$(id).disabled=b;for(const id of ['bending_model',...fields]){if($(id))$(id).disabled=b;}}
 const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));$('canvas').append(renderer.domElement);
 const scene=new THREE.Scene();scene.fog=new THREE.FogExp2(0x0d1722,.65);
 const camera=new THREE.PerspectiveCamera(40,1,.001,10);camera.up.set(0,0,1);camera.position.set(.36,-.46,.37);
@@ -74,6 +77,7 @@ function renderState(s){
  if(s.volume_mesh)$('tet-result').textContent=s.volume_mesh.tetrahedra?'Genesis / TetGen：'+s.volume_mesh.simulation_vertices+' 个求解顶点，'+s.volume_mesh.surface_vertices+' 个表面顶点，'+s.volume_mesh.tetrahedra+' 个四面体':'薄壳使用表面三角形';
  positions=s.positions;pins=s.pins;faces=s.faces??faces;
  if(s.faces){activeConfig=s.config;config=structuredClone(s.config);forces=structuredClone(s.config.forces);$('mesh-info').textContent=s.mesh.file+' · '+s.mesh.vertices+' 表面顶点 / '+s.mesh.triangles+' 三角形';rebuild();renderForces();}else updateGeometry();
+ if(s.config){const labels={full:'完整接触',no_self:'关闭自碰撞',ground_only:'仅保留地面接触',none:'关闭全部接触（含地面）'};$('solver-badge').textContent='FEM · '+labels[s.config.contact_mode??'ground_only'];$('capability').textContent='Genesis '+projectSpec.genesis_version+' · IPC / CUDA';}
  $('time').textContent=s.time.toFixed(3)+' s';$('frame').textContent=s.frame;$('backend').textContent=s.backend;if(s.frame===0)$('fps').textContent='—';
 }
 async function connect(){
@@ -87,10 +91,11 @@ function readConfig(){
  const material={...config?.material};
  material.bending_model=$('bending_model').value||null;
  for(const id of fields)if(!$(id).parentElement.hidden)material[id]=$(id).type==='checkbox'?$(id).checked:+$(id).value;
- return {...config,mesh:config.mesh,body_type:$('body_type').value,tet_max_volume_m3:+$('tet_max_volume_m3').value,material,contact_d_hat_m:+$('contact_d_hat_m').value,dt:+$('dt').value,gravity:[config.gravity[0],config.gravity[1],+$('gravity').value],pins:[...pins],forces:structuredClone(forces)};
+ return {...config,contact_mode:$('contact_mode').value,mesh:config.mesh,body_type:$('body_type').value,tet_max_volume_m3:+$('tet_max_volume_m3').value,material,contact_d_hat_m:+$('contact_d_hat_m').value,dt:+$('dt').value,gravity:[config.gravity[0],config.gravity[1],+$('gravity').value],pins:[...pins],forces:structuredClone(forces)};
 }
 function fillConfig(c){
  config=structuredClone(c);$('body_type').value=c.body_type;
+ $('contact_mode').value=c.contact_mode??'ground_only';
  $('bending_model').value=c.material.bending_model??'';
  for(const id of fields){const value=c.material[id]??projectSpec.material_schema.properties[id].default;if($(id).type==='checkbox')$(id).checked=value;else $(id).value=value;}
  $('tet_max_volume_m3').value=c.tet_max_volume_m3??-1;
@@ -98,7 +103,7 @@ function fillConfig(c){
  $('dt').value=c.dt;$('gravity').value=c.gravity[2];updateMaterialFields();
 }
 
-async function configure(c){pause();generation++;setBusy(true);status('构建仿真场景… IPC 首次启动需要编译内核');try{const s=await api.configure(c);selected=null;fillConfig(s.config);updateMarks();status('场景已就绪，可选中顶点添加力');$('dirty').textContent='设置已应用。';return true;}catch(e){if(activeConfig)fillConfig(activeConfig);status(e.message,true);return false;}finally{setBusy(false);updateSelection();}}
+async function configure(c){pause();generation++;setBusy(true);status('构建仿真场景… 首次启动需要编译内核');try{const s=await api.configure(c);selected=null;fillConfig(s.config);updateMarks();status('场景已就绪，可选中顶点添加力');$('dirty').textContent='设置已应用。';return true;}catch(e){if(activeConfig)fillConfig(activeConfig);status(e.message,true);return false;}finally{setBusy(false);updateSelection();}}
 async function step(){
  const start=performance.now();await api.step();const now=performance.now();
  const elapsed=playing&&lastFrameAt!==null?now-lastFrameAt:now-start;
@@ -111,6 +116,7 @@ $('step').onclick=async()=>{pause();generation++;setBusy(true);try{await step();
 $('apply').onclick=()=>{try{configure(readConfig());}catch(e){status(e.message,true);}};
 $('reset').onclick=()=>{if(config)configure({...config,forces:structuredClone(forces),pins:[...pins]});};
 $('body_type').onchange=()=>{updateMaterialFields();$('dirty').textContent='类型尚未应用：请点击「应用设置并重置」。当前 OBJ 和参数保留；体积要求封闭网格，变更模型后请重新选择固定点与受力点。';};
+$('contact_mode').onchange=()=>{updateMaterialFields();$('dirty').textContent='接触模式尚未应用：请点击「应用设置并重置」。';};
 $('pin').onclick=async()=>{
  if(selected===null||busy)return;pause();generation++;setBusy(true);
  const next=new Set(pins);if(next.has(selected))next.delete(selected);else next.add(selected);

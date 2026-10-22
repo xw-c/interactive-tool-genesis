@@ -9,12 +9,27 @@
 完整调参说明：[参数指南](static/parameter-guide.html)。启动后可点击网页右上角「调参说明」，或打开 http://127.0.0.1:3000/static/parameter-guide.html。覆盖材料、薄壳塑性、网格、接触、时间步、固定点和点力；体积塑性需项目原生 CUDA 扩展，尚未按真实材料标定。
 
 
+网页「接触模式」提供四档，也可设置 JSON 顶层 `contact_mode`：
+
+| 值 | 网页选项 | 接触行为 |
+| --- | --- | --- |
+| `full` | 完整接触 | 自碰撞、地面及其他物体接触 |
+| `no_self` | 关闭自碰撞 | 同一软体可自穿透，保留地面及其他物体接触 |
+| `ground_only`（默认） | 仅保留地面接触 | 禁用自身及其他物体接触，仅保留地面碰撞与摩擦 |
+| `none` | 关闭全部接触 | 可穿过自身、地面及其他物体 |
+
+各档均保留原有 libuipc FEM 求解、本构、拉伸/剪切/弯曲、塑性设置、固定点和点力，不切换到 Genesis 普通体积 FEM。旧 JSON 缺少字段时默认仅保留地面接触。点击「应用设置并重置」后生效并清空变形历史；导入 JSON、导出和保存配置均包含此字段。`contact_d_hat_m` 在 `none` 下不参与接触，数值保留便于切回；禁用自身接触后不再显示自身接触尺度预警。当前工具只有一个软体和地面，因此 `no_self` 与 `ground_only` 的实际碰撞对象相同；后者显式禁用所有非地面的物体间接触对。
+
+`none` 使用原生 `IPCCouplerOptions(contact_enable=False, contact_friction_enable=False)`；`no_self` 在 Genesis 注册完接触对后、libuipc 初始化前仅将本软体的自身接触对设为禁用。该过滤适配依赖 Genesis 内部 `_register_contact_pairs`、`_ipc_cloth_contacts` / `_ipc_fem_contacts`，升级后需复验。性能和效果对照见 [接触模式测试报告](benchmarks/CONTACT_MODES.md)，复现：`python -m benchmarks.contact_modes --suite`。
+
+`ground_only` 在接触对注册后禁用 cloth/FEM/ABD 之间的全部接触对（含自身），保留所有平面地面接触对及其摩擦/阻力参数；全局接触与摩擦仍开启。此模式同样依赖 Genesis 内部注册接口，升级后须复验。
+
 薄壳和体积软体均绑定 Genesis IPC。Genesis 使用 gs.cuda，IPC 使用独立 CUDA 引擎；要求 CUDA 版 PyTorch 和可用 NVIDIA GPU，无法使用 CUDA 时直接报错，不回退 CPU。OBJ/TetGen 预处理、Python 输入整理、网页通信和结果取回仍包含 CPU 工作。
 
 - body_type：shell 或 volume。
 - mesh：项目内 OBJ 路径，单位 m。直接使用 Genesis 内置读取函数，不自写 OBJ 解析。
 - tet_max_volume_m3：-1 自动划分，正数指定最大四面体体积（m³），仅体积模式使用。正数会允许 TetGen 细分边界。
-- dt：每次 step 对应的时间（s）；子步数使用 Genesis 默认值 1。
+- dt：每次 step 对应的时间（s），默认 1/60 s（约 0.0166667）；子步数使用 Genesis 默认值 1。达到实时需要每秒推进 60 步，不代表程序保证运行到 60 FPS；已有配置中显式保存的 dt 按原值读取。
 - gravity：三维重力（m/s²）。
 - material：youngs_modulus_pa、poisson_ratio、density_kg_m3、self_friction；薄壳另有 thickness_m、shear_stiffness_n_m、bending_model（DiscreteShellBending 或 null）、bending_rigidity_nm。
 - pins：表面固定点编号；forces：[{"vertex":0,"vector":[0,0,0.001]}]，单位 N。
@@ -104,6 +119,10 @@ volume 输入必须封闭并有一致的朝外法线，Genesis 自动调用 TetG
 
 状态包含 positions、pins、time、frame、backend、metrics。configure / pins / snapshot 还返回 faces、config、mesh、volume_mesh；volume_mesh 给出表面顶点数、全部求解顶点数与四面体数。positions / faces 均只包含表面。
 
+配置 `step_mode` 默认 `libuipc`（旧 JSON 缺少该字段时也使用此默认值），绕过 Genesis 每步调度，直接 `World.advance/retrieve` 并读取 IPC 位置，适用于本工具的单软体与静态地面、单子步场景；FEM、塑性、外力动画和接触仍在 IPC 内求解。此模式不更新 Genesis 实体状态、内部计数、传感器或场景回调，不能用于需要这些功能的集成。需要完整调度时设置 `"step_mode":"genesis_world"`，使用 Genesis 的 `scene.step()`，完成软体状态同步、场景时间及回调调度。网页接口仍返回表面位置及应用自己的时间、帧数；`engine.get_simulation_positions()` 返回最近一次成功步的全部顶点副本。网页导入、编辑和导出 JSON 会保留该设置；显式指定的 `genesis_world` 不会被自动替换。
+
+默认自动尝试 MAS，无需选择预条件器。缺少网格分区接口、缺少 MAS CUDA stream 修复、全部求解顶点固定或分区失败时，初始化阶段自动回退 diag，并输出原因；部分生成的分区属性会清理。没有 `INTERACTIVE_IPC_FEM_PRECONDITIONER` 开关或构造参数。MAS 修复包位于 `runtime/mas-stream/package`；HTTP/WS 字段保持不变。相同加权残差阈值不等于等精度，MAS 的实际速度与误差仍取决于场景；历史计时使用旧步进路径，不能代表当前性能。
+
 前端塑性联调约定：材料参数见上方表格。求解失败返回 {"type":"error","message":"...","request_id":...}，前端停止自动 step 并提示重置。重置使用 configure(config)，没有单独的 reset 消息；重新配置会清空塑性历史。当前接口不返回逐单元塑性应变或塑性云图数据。交付验收至少覆盖 configure、step、错误提示和重新 configure 后恢复运行。
 
 ## 后端文件
@@ -122,7 +141,7 @@ engine.py 不再检查版本必须等于 1.4.4；requirements.txt 记录所复�
 
 FiniteElementExternalForce 是 from uipc.constitution 直接导入的类。创建实例、注册到 constitution_tabular、apply_to 物体、写入输入数据，是启用 uipc 内置外力功能；不是安装额外软件。
 
-交付后端：app/、native/、run.py、requirements.txt、scene.json、model.obj、README.md；联调附 static/ 与 start.ps1。当前体积功能还须携带完整的 runtime/plasticity-only/package/（包含 uipc Python 包、原生库和包内元数据），不能排除整个 runtime。可排除 .venv/、__pycache__/、runtime 中其余构建中间文件、缓存和实验结果。原生包可能未被 Git 跟踪，需要单独作为交付附件分发。
+交付后端：app/、native/、run.py、requirements.txt、scene.json、model.obj、README.md；联调附 static/ 与 start.ps1。MAS 优化版须携带完整的 runtime/mas-stream/package/（包含 uipc Python 包、原生库、构建元数据及 mas-stream-validated.json）；保留 runtime/plasticity-only/package/ 可复现旧后端和对角路径。不能排除整个 runtime。可排除 .venv/、__pycache__/、runtime 中其余构建中间文件、缓存和实验结果。原生包可能未被 Git 跟踪，需要单独作为交付附件分发。
 
 跨机器部署不要求相同项目路径，但要求运行环境与原生二进制兼容。当前包是 Windows x64 / CPython 3.11 构建，CUDA 编译目标包含 compute_75/sm_75；不能承诺任意系统、Python 版本或 GPU 都可直接使用，也不意味着只有同型号显卡可用。接收方需要可用的 NVIDIA 驱动及匹配的 CUDA/PyTorch 依赖；当前验证环境为 Quadro RTX 8000、torch 2.8.0+cu126。跨平台或不兼容环境需重建完整扩展包；全新机器部署尚未验证。
 
@@ -145,6 +164,6 @@ IPC 接触激活距离通过 scene.json 顶层 `contact_d_hat_m` 设置，默认
 
 ## 版本管理
 
-Git 跟踪后端、网页及 Three.js 许可证、启动脚本、依赖说明、场景配置、OBJ 网格，以及 benchmarks/ 中的测试脚本和调研报告。OBJ 是仿真输入，不作为编译产物忽略。
+Git 跟踪后端、网页及 Three.js 许可证、启动脚本、依赖说明、场景配置和回归测试。根目录 model.obj 是本地工作网格，取消跟踪但保留在磁盘；运行当前场景仍需要它，换机或新检出仓库时须自行提供模型或更改 mesh 路径。benchmarks/ 中的新实验、报告及结果只在本地保留，已有回归测试依赖的脚本和网格仍跟踪。本文中的实验报告链接仅供本地查看。
 
 .venv/、runtime/、dist/ 与 Python 缓存不纳入版本管理；这些目录不会被删除。runtime/ 中的日志、矩阵、仿真快照和图表需在本机运行相应实验生成，报告中的 runtime 链接依赖这些本地结果。dist/ 中的 ZIP 是交付产物，其核心程序、网页与测试网格均已作为源文件跟踪。包内 BACKEND.md 的接口内容已包含在根目录 README.md，旧 MANIFEST.sha256 仅适用于该次打包。
