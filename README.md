@@ -94,6 +94,26 @@ volume 输入必须封闭并有一致的朝外法线，Genesis 自动调用 TetG
 
 ## 最小接口
 
+### 按单元赋材质
+
+可直接在网页「导入 JSON」中加载 [shell_1k 左软右硬样例](benchmarks/shell_1k_material_regions.json)，再点击「开始」。它与原有样例放在一起，复用仓库中的 `benchmarks/shell_1k.obj`，固定后侧两排共 80 个顶点，右半 936 个面使用较硬材质，`dt=1/60`。
+
+复用原有 `configure`，在配置中增加 `material_regions`。`elements` 是从 0 开始的三角面编号（薄壳）或 TetGen 四面体编号（体积）；未覆盖的单元和参数继承默认 `material`。
+
+```javascript
+const state = await api.snapshot();
+state.config.material_regions = [
+  {elements: [0, 1, 2], material: {youngs_modulus_pa: 300000, density_kg_m3: 600}}
+];
+await api.configure(state.config); // 重建、时间归零；设为空数组可清除局部材质
+```
+
+configure / snapshot 新增 `element_mesh`：`elements` 的行号就是单元编号，行内顶点号索引其全体顶点 `positions`（含体积内部点）；薄壳行号与原有 `faces` 一致。`material_ids` 为 0 时使用默认材质，1、2… 对应区域顺序；`surface_vertex_ids` 将表面点编号映射到全体顶点。普通 step 不重复返回拓扑。区域重叠、越界和非法参数会报错。更换网格、软体类型或四面体划分后须重新选择单元；替换 OBJ 自动清除区域。原有点力、固定点编号仍是表面编号。
+
+弹性和塑性参数按单元写入原生属性，密度按单元体积装配质量，保留共享顶点。薄壳共享边的弯曲参数按相邻面的静止面积加权；一侧未启用折痕塑性时该边保持弹性。局部厚度用于膜刚度和质量；原生后端要求统一碰撞厚度，因此碰撞厚度和摩擦仍使用全局材质。局部指定摩擦会报错。配置可保存和导入/导出，网页默认材质表单保留局部配置。
+
+测试：`python -m unittest discover -s tests -p test_element_materials.py -v`，设置 `IPC_MATERIAL_GPU_TEST=1` 运行真实 CUDA 回归。
+
 前端使用 static/api.js 的 SimulationAPI。
 
     const api = new SimulationAPI();

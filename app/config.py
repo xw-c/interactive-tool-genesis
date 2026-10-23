@@ -1,6 +1,6 @@
 """File/API input types. Only physical and structural constraints are enforced."""
-from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
+from typing import Annotated, Literal
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, field_serializer, field_validator
 
 class Input(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
@@ -25,6 +25,21 @@ class Force(Input):
     vertex: int=Field(ge=0)
     vector: tuple[float,float,float]
 
+class MaterialRegion(Input):
+    name: str=''
+    elements: list[Annotated[int,Field(ge=0,strict=True)]]=Field(min_length=1)
+    material: Material
+
+    @field_validator('material')
+    @classmethod
+    def global_friction_only(cls,value):
+        if 'self_friction' in value.model_fields_set:raise ValueError('摩擦仅支持全局 material.self_friction')
+        return value
+
+    @field_serializer('material')
+    def serialize_material(self,value):
+        return value.model_dump(exclude_unset=True)
+
 class Setup(Input):
     step_mode: Literal['libuipc','genesis_world']=Field('libuipc',title='步进路径',description='libuipc（默认）：单软体与静态地面直接 IPC 步进，不同步 Genesis 实体状态、计数及回调；genesis_world：完整 Genesis 调度。')
     contact_mode: Literal['full','no_self','ground_only','none']=Field('ground_only',title='接触模式',description='ground_only（默认）：仅保留地面接触，关闭自身及其他物体接触；full：完整接触；no_self：只关闭同一软体的自碰撞；none：包括地面在内关闭全部接触。')
@@ -32,6 +47,7 @@ class Setup(Input):
     body_type: Literal['shell','volume']='shell'
     tet_max_volume_m3: Literal[-1] | PositiveFloat=-1
     material: Material=Field(default_factory=Material)
+    material_regions: list[MaterialRegion]=Field(default_factory=list)
     contact_d_hat_m: PositiveFloat=Field(.0005,title='IPC 接触激活距离 / m')
     dt: PositiveFloat=1/60
     gravity: tuple[float,float,float]=(0,0,-9.81)

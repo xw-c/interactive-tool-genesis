@@ -36,4 +36,8 @@ config=vm.runInContext('readConfig()',ctx);assert.equal(config.material.volume_p
 assert.equal(config.material.volume_yield_strain_percent,12);
 ctx.roundtrip=JSON.parse(JSON.stringify(config));vm.runInContext('fillConfig(roundtrip)',ctx);
 assert.equal(get('volume_plasticity').checked,true);assert.equal(get('volume_yield_strain_percent').value,12);
+ctx.roundtrip.material_regions=[{name:'region',elements:[0,2],material:{youngs_modulus_pa:300000}}];
+vm.runInContext('fillConfig(roundtrip)',ctx);
+config=vm.runInContext('readConfig()',ctx);
+assert.deepEqual(JSON.parse(JSON.stringify(config.material_regions)),ctx.roundtrip.material_regions);
 console.log('PASS: plasticity material form visibility, booleans, numeric units and JSON round trip');

@@ -37,7 +37,7 @@ def save_project(data):
     return dict(config=config.model_dump(mode='json'))
 
 def replace_mesh(text):
-    config=read_config().model_copy(update=dict(mesh='model.obj',pins=[],forces=[]))
+    config=read_config().model_copy(update=dict(mesh='model.obj',pins=[],forces=[],material_regions=[]))
     # Validate with the native loader before replacing the user's file.
     with tempfile.TemporaryDirectory(dir=ROOT/'runtime') as folder:
         path=Path(folder)/'upload.obj'

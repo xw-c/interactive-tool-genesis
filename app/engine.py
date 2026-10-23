@@ -5,9 +5,11 @@ import numpy as np
 import genesis as gs
 from .config import Force
 from .mesh import mesh_path, contact_check
+from .materials import resolve_materials, element_material_ids, configure_elements
 
 class GenesisEngine:
     def __init__(self,config):
+        self.materials=resolve_materials(config)
         # Both Genesis kernels and the independent IPC engine use CUDA.
         if not gs._initialized:gs.init(backend=gs.cuda,precision='64',logging_level='warning')
         if gs.backend!=gs.cuda:raise RuntimeError('本工具要求 Genesis CUDA 后端，请在新进程中使用 gs.cuda 初始化')
@@ -15,7 +17,7 @@ class GenesisEngine:
         self.fem_preconditioner_fallback_reason=None
         self.config=config;self.time=0.;self.frame=0;self.step_ms=0.;self._failed=False
         m=config.material;shell=config.body_type=='shell'
-        if not shell and m.volume_plasticity:
+        if not shell and any(material.volume_plasticity for material in self.materials):
             from .plasticity import require_volume_backend
             require_volume_backend()
         self.scene=gs.Scene(sim_options=gs.options.SimOptions(dt=config.dt,gravity=config.gravity),
@@ -25,13 +27,15 @@ class GenesisEngine:
             self.scene.add_entity(gs.morphs.Plane(),material=gs.materials.Rigid(coup_friction=m.self_friction))
             common=dict(E=m.youngs_modulus_pa,nu=m.poisson_ratio,rho=m.density_kg_m3,friction_mu=m.self_friction)
             material=gs.materials.FEM.Cloth(**common,thickness=m.thickness_m/2,
-                bending_stiffness=m.bending_rigidity_nm if m.bending_model and not m.bending_plasticity else None) if shell else gs.materials.FEM.Elastic(**common)
+                bending_stiffness=m.bending_rigidity_nm if m.bending_model and not m.bending_plasticity and not config.material_regions else None) if shell else gs.materials.FEM.Elastic(**common)
             self.entity=self.scene.add_entity(gs.morphs.Mesh(file=str(mesh_path(config.mesh)),decimate=False,
                 maxvolume=config.tet_max_volume_m3 if not shell else -1,
                 nobisect=shell or config.tet_max_volume_m3==-1),material=material)
             vertices=self.entity.init_positions.detach().cpu().numpy().reshape(-1,3)
             self._positions=vertices.copy()
             triangles=self.entity.surface_triangles
+            self.elements=np.asarray(triangles if shell else self.entity.elems,dtype=np.int64).copy()
+            self.element_material_ids=element_material_ids(config,len(self.elements))
             self.surface_ids=np.unique(triangles)
             self.faces=np.searchsorted(self.surface_ids,triangles)
             self.x=vertices[self.surface_ids].copy()
@@ -62,12 +66,14 @@ class GenesisEngine:
             original()
             external_force=FiniteElementExternalForce()
             c._ipc_constitution_tabular.insert(external_force)
-            plastic_bending=None
+            bending=None
             m=self.config.material
-            if self.config.body_type=='shell' and m.bending_plasticity and m.bending_model:
-                from uipc.constitution import StrainPlasticDiscreteShellBending
-                plastic_bending=StrainPlasticDiscreteShellBending()
-                c._ipc_constitution_tabular.insert(plastic_bending)
+            if self.config.body_type=='shell' and (self.config.material_regions or (m.bending_plasticity and m.bending_model)):
+                from uipc.constitution import DiscreteShellBending, StrainPlasticDiscreteShellBending
+                if any(mat.bending_model for mat in self.materials):
+                    cls=StrainPlasticDiscreteShellBending if any(mat.bending_model and mat.bending_plasticity for mat in self.materials) else DiscreteShellBending
+                    bending=cls()
+                    c._ipc_constitution_tabular.insert(bending)
             name=('cloth' if self.config.body_type=='shell' else 'fem')+'_0_0'
             body=c._ipc_objects.find(name)[0]
             geometries=[slot.geometry() for slot in c._ipc_scene.geometries().find(body.geometries().ids()[0])]
@@ -77,8 +83,13 @@ class GenesisEngine:
                 elif m.volume_plasticity:
                     from .plasticity import configure_volume
                     configure_volume(geometry,m)
-                if plastic_bending is not None:
-                    plastic_bending.apply_to(geometry,m.bending_rigidity_nm,
+                if self.config.material_regions:
+                    cells=geometry.triangles() if self.config.body_type=='shell' else geometry.tetrahedra()
+                    if not np.array_equal(np.asarray(cells.topo().view()).reshape(self.elements.shape),self.elements):
+                        raise RuntimeError('IPC 单元顺序与公开编号不一致，无法安全赋材质')
+                    configure_elements(geometry,self.config.body_type,self.materials,self.element_material_ids,bending)
+                elif bending is not None:
+                    bending.apply_to(geometry,m.bending_rigidity_nm,
                         np.deg2rad(m.bending_yield_angle_deg),m.bending_plastic_hardening)
                 external_force.apply_to(geometry,np.zeros(3,dtype=np.float64))
                 fixed=geometry.vertices().find(uipc.builtin.is_fixed)
@@ -205,6 +216,10 @@ class GenesisEngine:
         data=dict(positions=self.x.tolist(),time=self.time,frame=self.frame,pins=self.config.pins,
             backend='Genesis CUDA / IPC CUDA',contact_mode=self.config.contact_mode,metrics={'step_ms':self.step_ms})
         if mesh:data.update(contact_check=self.contact_check,faces=self.faces.tolist(),config=self.config.model_dump(mode='json'),volume_mesh=self.mesh_info,
+            element_mesh=dict(kind='triangle' if self.config.body_type=='shell' else 'tetrahedron',
+                index_base=0,positions=self._positions.tolist(),
+                elements=self.elements.tolist(),material_ids=self.element_material_ids.tolist(),
+                surface_vertex_ids=self.surface_ids.tolist()),
             mesh=dict(file=self.config.mesh,vertices=len(self.surface_ids),triangles=len(self.faces),index_base=0,units='m',index_source='simulation_surface'))
         return data
 
