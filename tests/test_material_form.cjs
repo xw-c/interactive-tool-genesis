@@ -14,7 +14,7 @@ const prefix=code.slice(code.indexOf('const $='),code.indexOf('let config=null')
 const read=code.slice(code.indexOf('function readConfig()'),code.indexOf('async function configure(c)'));
 const spec=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 const ctx=vm.createContext({document,structuredClone,console,spec,SimulationAPI:class {}});
-vm.runInContext(prefix+'\nlet config=null,pins=[],forces=[];\n'+read,ctx);
+vm.runInContext(prefix+'\nlet config=null,pins=[],forces=[],busy=false;\n'+read,ctx);
 vm.runInContext('buildForm(spec);fillConfig(spec.config)',ctx);
 const get=id=>document.getElementById(id);
 assert.equal(get('bending_plasticity').checked,false);
@@ -41,3 +41,20 @@ vm.runInContext('fillConfig(roundtrip)',ctx);
 config=vm.runInContext('readConfig()',ctx);
 assert.deepEqual(JSON.parse(JSON.stringify(config.material_regions)),ctx.roundtrip.material_regions);
 console.log('PASS: plasticity material form visibility, booleans, numeric units and JSON round trip');
+
+// Selecting a shell in a USD asset must use its type, not the global volume default.
+ctx.shellSpec=JSON.parse(JSON.stringify(spec));
+ctx.shellSpec.config.body_type='volume';
+ctx.shellSpec.config.bodies={};
+ctx.shellSpec.bodies={'/cloth':{kind:'fem',body_type:'shell',material:spec.config.material,
+ editable_fields:Object.keys(spec.config.material).filter(k=>!k.startsWith('volume_'))}};
+vm.runInContext("buildForm(shellSpec);selectedBody='/cloth';fillConfig(shellSpec.config)",ctx);
+assert.equal(get('thickness_m').parentElement.hidden,false);
+assert.equal(get('shear_stiffness_n_m').parentElement.hidden,false);
+assert.equal(get('bending_model').parentElement.hidden,false);
+assert.equal(get('volume_plasticity').parentElement.hidden,true);
+get('thickness_m').value='.002';
+config=vm.runInContext('readConfig()',ctx);
+assert.equal(config.bodies['/cloth'].material.thickness_m,.002);
+assert.equal(config.material.thickness_m,spec.config.material.thickness_m);
+console.log('PASS: USD shell selection and scoped thickness override');

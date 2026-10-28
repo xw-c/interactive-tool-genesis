@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from itertools import product
 import numpy as np
 import app  # Select the configured native package before any uipc import.
 
@@ -32,27 +33,32 @@ class NativeAssetTests(unittest.TestCase):
         from app.config import Setup
         from app.engine import GenesisEngine
         import genesis as gs
-        for kinds in (('fem','fem'),('fem','abd'),('abd','fem'),('abd','abd')):
+        for kinds in product(('fem','shell','abd'), repeat=2):
             with self.subTest(kinds=kinds), tempfile.TemporaryDirectory() as folder:
                 file=Path(folder)/'automatic.usda'
                 stage=Usd.Stage.CreateNew(str(file))
                 UsdGeom.SetStageMetersPerUnit(stage,1.)
                 UsdGeom.SetStageUpAxis(stage,'Z')
                 material=UsdShade.Material.Define(stage,'/material')
-                for key,value in [('youngsModulus',5e5),('poissonsRatio',.2),('density',500.)]:
-                    material.GetPrim().CreateAttribute('physxDeformableBodyMaterial:'+key,Sdf.ValueTypeNames.Float).Set(value)
+                for namespace in ('physxDeformableBodyMaterial:', 'physxDeformableSurfaceMaterial:'):
+                    for key,value in [('youngsModulus',5e5),('poissonsRatio',.2),('density',500.)]:
+                        material.GetPrim().CreateAttribute(namespace+key,Sdf.ValueTypeNames.Float).Set(value)
                 for path,kind in zip(('/arbitrary/left','/arbitrary/right'),kinds):
                     mesh=UsdGeom.Mesh.Define(stage,path)
                     # Three distant attachment sites in one authored structure.
-                    x=np.vstack([VERTICES+[shift,0,1] for shift in (0,.5,1.)])
+                    base=VERTICES[:3] if kind=='shell' else VERTICES
+                    x=np.vstack([base+[shift,0,1] for shift in (0,.5,1.)])
                     mesh.CreatePointsAttr(x.tolist())
-                    mesh.CreateFaceVertexCountsAttr([3]*12)
-                    faces=np.array([0,2,1,0,1,3,0,3,2,1,2,3])
-                    mesh.CreateFaceVertexIndicesAttr(np.concatenate([faces+4*i for i in range(3)]).tolist())
+                    faces=np.array([0,1,2] if kind=='shell' else [0,2,1,0,1,3,0,3,2,1,2,3])
+                    mesh.CreateFaceVertexCountsAttr([3]*(3 if kind=='shell' else 12))
+                    mesh.CreateFaceVertexIndicesAttr(np.concatenate([faces+len(base)*i for i in range(3)]).tolist())
                     prim=mesh.GetPrim()
-                    if kind=='fem':
-                        prim.CreateAttribute('physxDeformable:simulationRestPoints',Sdf.ValueTypeNames.Point3fArray).Set(x.tolist())
-                        prim.CreateAttribute('physxDeformable:simulationIndices',Sdf.ValueTypeNames.IntArray).Set(list(range(12)))
+                    if kind in ('fem','shell'):
+                        if kind=='fem':
+                            prim.CreateAttribute('physxDeformable:simulationRestPoints',Sdf.ValueTypeNames.Point3fArray).Set(x.tolist())
+                            prim.CreateAttribute('physxDeformable:simulationIndices',Sdf.ValueTypeNames.IntArray).Set(list(range(12)))
+                        else:
+                            prim.SetMetadata('apiSchemas', Sdf.TokenListOp.Create(prependedItems=['PhysxDeformableSurfaceAPI']))
                         UsdShade.MaterialBindingAPI.Apply(prim).Bind(material,materialPurpose='physics')
                     else:
                         UsdPhysics.RigidBodyAPI.Apply(prim)
@@ -60,12 +66,12 @@ class NativeAssetTests(unittest.TestCase):
                 attachment=stage.DefinePrim('/connection','PhysxPhysicsAttachment')
                 for i,path in enumerate(('/arbitrary/left','/arbitrary/right')):
                     attachment.CreateRelationship(f'actor{i}').SetTargets([path])
-                    samples=[(shift+delta,.01,1.01) for shift in (0,.5,1.) for delta in (.01,.011)]
+                    samples=[(shift+delta,.01,1. if 'shell' in kinds else 1.01) for shift in (0,.5,1.) for delta in (.01,.011)]
                     attachment.CreateAttribute(f'points{i}',Sdf.ValueTypeNames.Point3fArray).Set(samples)
                 stage.GetRootLayer().Save()
                 left_material={'youngs_modulus_pa':1e6}
-                if os.environ.get('IPC_VOLUME_GPU_TEST')=='1':left_material['volume_plasticity']=True
-                overrides={'/arbitrary/left':({'material':left_material} if kinds[0]=='fem' else {'mass_kg':.2})}
+                if os.environ.get('IPC_VOLUME_GPU_TEST')=='1' and kinds[0]=='fem':left_material['volume_plasticity']=True
+                overrides={'/arbitrary/left':({'material':left_material} if kinds[0]!='abd' else {'mass_kg':.2})}
                 engine=GenesisEngine(Setup(mesh=str(file),body_type='volume',dt=.001,gravity=(0,0,0),contact_mode='none',bodies=overrides),
                     ipc_options=gs.options.IPCCouplerOptions(contact_enable=False,newton_semi_implicit_enable=False),output=Path(folder)/'run')
                 try:
@@ -73,6 +79,13 @@ class NativeAssetTests(unittest.TestCase):
                     self.assertEqual(len(state['attachments']),1)
                     self.assertGreater(state['attachments'][0]['pair_count'],0)
                     self.assertAlmostEqual(state['attachments'][0]['total_stiffness_n_m'],1500.)
+                    blocks=state['element_mesh']['blocks']
+                    self.assertEqual(len(blocks),sum(kind!='abd' for kind in kinds))
+                    for block in blocks:
+                        self.assertTrue(all(len(cell)==(3 if block['kind']=='triangle' else 4) for cell in block['elements']))
+                    if set(kinds)=={'fem','shell'}:
+                        self.assertEqual(state['element_mesh']['kind'],'mixed')
+                        self.assertEqual(state['element_mesh']['elements'],[])
                     if kinds[0]=='fem':
                         import uipc
                         cells=engine._usd.slots['/arbitrary/left'].geometry().tetrahedra()
@@ -82,10 +95,25 @@ class NativeAssetTests(unittest.TestCase):
                     for _ in range(3):engine.step(snapshot=False)
                     self.assertTrue(np.isfinite(engine.get_simulation_positions()).all())
                 finally:engine.close()
+                if kinds[0]==kinds[1]:
+                    # The authored actor relationships may also target one body twice.
+                    attachment.GetRelationship('actor1').SetTargets(['/arbitrary/left'])
+                    for end in (0,1):
+                        samples=[(shift+(.05 if end and kinds[0]!='abd' else 0.),0.,1.) for shift in (0,.5,1.)]
+                        attachment.GetAttribute(f'points{end}').Set(samples)
+                    stage.GetRootLayer().Save()
+                    preview=GenesisEngine(Setup(mesh=str(file),dt=.001,contact_mode='none'),preview=True)
+                    try:
+                        record=preview.state(True)['attachments'][0]
+                        self.assertEqual(record['body0'],record['body1'])
+                        self.assertEqual(record['pair_count'],3)
+                        self.assertTrue(all(a!=b for a,b in record['node_pairs']))
+                    finally:preview.close()
 
     def make_scene(self, left_kind, right_kind):
         from uipc.core import Scene
-        from app.usd import _abd_geometry, _fem_geometry
+        from app.usd import _abd_geometry, _fem_geometry, _shell_geometry
+        from app.config import Material
         config = Scene.default_config()
         config['dt'] = .001
         config['gravity'] = [[0.], [0.], [-9.81]]
@@ -97,13 +125,18 @@ class NativeAssetTests(unittest.TestCase):
             vertices = VERTICES.copy()
             if index:
                 vertices[3, 2] *= -1
-            geometry = (_fem_geometry(vertices, np.array([[0, 1, 2, 3]]), 5e5, .2, 500., fixed=index == 0)
+            geometry = (_shell_geometry(vertices[:3], np.array([[0,1,2]]), Material(youngs_modulus_pa=5e5), fixed=index == 0)
+                        if kind=='shell' else _fem_geometry(vertices, np.array([[0, 1, 2, 3]]), 5e5, .2, 500., fixed=index == 0)
                         if kind == 'fem' else _abd_geometry(vertices, .1, fixed=index == 0))
             slots.append(scene.objects().create(str(index)).geometries().create(geometry)[0])
         return scene, slots
 
     def test_rejections_do_not_append_anchors(self):
-        from app.attachments import fixed_joint, stitch_points, stitch_vertices
+        from app.attachments import fixed_joint, stitch_points, stitch_vertices, locate_elements
+        triangle=np.array([[0.,0.,0.],[1.,0.,1.],[0.,1.,1.]])
+        np.testing.assert_array_equal(locate_elements([[.2,.2,.4]],triangle,np.array([[0,1,2]])),[0])
+        for point in ([2.,2.,4.],[.2,.2,.5]):
+            with self.assertRaises(ValueError):locate_elements([point],triangle,np.array([[0,1,2]]))
         scene, (left, right) = self.make_scene('fem', 'abd')
         count = right.geometry().vertices().size()
         invalid = [
@@ -135,8 +168,9 @@ class NativeAssetTests(unittest.TestCase):
         from uipc.core import Engine, World
         from app.attachments import fixed_joint, stitch_points
         uipc.Logger.set_level(uipc.Logger.Level.Warn)
-        cases = [(a, b, 'stitch') for a in ('fem', 'abd') for b in ('fem', 'abd')]
+        cases = [(a, b, 'stitch') for a, b in product(('fem','shell','abd'), repeat=2)]
         cases += [('abd', 'abd', 'joint'), ('fem', 'fem', 'detached'), ('abd', 'abd', 'detached')]
+        cases += [('shell','shell','detached'), ('shell','fem','detached')]
         for left_kind, right_kind, mode in cases:
             with self.subTest(left=left_kind, right=right_kind, mode=mode), tempfile.TemporaryDirectory() as temporary:
                 scene, (left, right) = self.make_scene(left_kind, right_kind)
@@ -153,7 +187,7 @@ class NativeAssetTests(unittest.TestCase):
                     world.retrieve()
                     self.assertTrue(world.is_valid())
                 geometry = right.geometry()
-                if right_kind == 'fem':
+                if right_kind != 'abd':
                     final = np.asarray(uipc.view(geometry.positions())).reshape(-1, 3)[:3]
                 else:
                     transform = np.asarray(uipc.view(geometry.transforms()))[0]
@@ -215,6 +249,101 @@ class NativeAssetTests(unittest.TestCase):
             self.assertLess((sim.get_simulation_positions('/renamed/soft')-initial)[:, 2].mean(), -.03)
             sim.close()
             del sim
+
+    def test_same_geometry_connections(self):
+        from app.attachments import stitch_points, stitch_vertices
+        from app.usd import _fem_geometry, _shell_geometry, _abd_geometry
+        from app.config import Material
+        from uipc.core import Engine, World, Scene
+        import uipc
+        for kind in ('fem','shell','abd'):
+            for attached in (False, True):
+                with self.subTest(kind=kind, attached=attached), tempfile.TemporaryDirectory() as folder:
+                    config=Scene.default_config();config['dt']=.001
+                    config['contact']['enable']=0;config['newton']['semi_implicit']['enable']=0
+                    scene=Scene(config)
+                    # Two disconnected components inside ONE deformable geometry.
+                    base=VERTICES[:3] if kind=='shell' else VERTICES
+                    count=len(base)
+                    vertices=np.vstack((base,base+[0,0,.003]))
+                    if kind=='abd':
+                        geometry=_abd_geometry(VERTICES,.1)
+                    elif kind=='shell':
+                        geometry=_shell_geometry(vertices,np.array([[0,1,2],[3,4,5]]),Material())
+                    else:
+                        geometry=_fem_geometry(vertices,np.array([[0,1,2,3],[4,5,6,7]]),5e5,.2,500.)
+                    if kind!='abd':
+                        uipc.view(geometry.vertices().find('is_fixed')).reshape(-1)[:count]=1
+                    slot=scene.objects().create('self').geometries().create(geometry)[0]
+                    geometry=slot.geometry()
+                    if attached:
+                        if kind=='abd':
+                            # A rigid body's coincident internal references are redundant.
+                            stitch,_=stitch_points(scene,'self-stitch',slot,slot,VERTICES[:3],VERTICES[:3],1e5)
+                            pairs=np.asarray(uipc.view(stitch.geometry().instances().find('topo'))).reshape(-1,2)
+                            self.assertTrue(np.all(pairs[:,0]!=pairs[:,1]))
+                        else:
+                            stitch_points(scene,'self-stitch',slot,slot,base[:3],vertices[count:count+3],1e5,
+                                vertex_ids0=np.arange(3),vertex_ids1=np.arange(3)+count)
+                    with self.assertRaises(ValueError):
+                        stitch_vertices(scene,'invalid-self-node',slot,slot,np.array([[0,0]]),1e3)
+                    engine=Engine('cuda',folder);world=World(engine);world.init(scene)
+                    self.assertTrue(world.is_valid())
+                    for _ in range(100):world.advance();world.retrieve()
+                    self.assertTrue(world.is_valid())
+                    if kind!='abd':
+                        x=np.asarray(uipc.view(geometry.positions())).reshape(-1,3)
+                        gap=np.linalg.norm(x[count:count+3]-base[:3],axis=1).max()
+                        self.assertLess(gap,.002) if attached else self.assertGreater(gap,.03)
+                    del world,engine
+
+    def test_shell_units_material_force_and_drive(self):
+        from pxr import Sdf, Usd, UsdGeom, UsdShade
+        from app.config import Setup
+        from app.engine import GenesisEngine
+        import uipc
+        with tempfile.TemporaryDirectory() as folder:
+            filename=Path(folder)/'cloth.usda'
+            stage=Usd.Stage.CreateNew(str(filename))
+            UsdGeom.SetStageMetersPerUnit(stage,.01);UsdGeom.SetStageUpAxis(stage,'Y')
+            mesh=UsdGeom.Mesh.Define(stage,'/cloth')
+            mesh.CreatePointsAttr([(0,100,0),(5,100,0),(0,100,-5),(5,100,-5)])
+            mesh.CreateFaceVertexCountsAttr([3,3]);mesh.CreateFaceVertexIndicesAttr([0,1,2,1,3,2])
+            mesh.GetPrim().SetMetadata('apiSchemas',Sdf.TokenListOp.Create(prependedItems=['PhysxDeformableSurfaceAPI']))
+            material=UsdShade.Material.Define(stage,'/material')
+            for key,value in [('youngsModulus',5e5),('poissonsRatio',.2),('density',500.),('thickness',.1),('dynamicFriction',.3)]:
+                material.GetPrim().CreateAttribute('physxDeformableSurfaceMaterial:'+key,Sdf.ValueTypeNames.Float).Set(value)
+            UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(material,materialPurpose='physics')
+            stage.GetRootLayer().Save()
+            setup=Setup(mesh=str(filename),body_type='volume',dt=.001,contact_mode='none',bodies={
+                '/cloth':{'material':{'density_kg_m3':1000.},'material_regions':[{'elements':[1],'material':{'density_kg_m3':750.}}]}})
+            engine=GenesisEngine(setup,output=Path(folder)/'free')
+            try:
+                info=engine.state(True)
+                self.assertEqual(info['element_mesh']['kind'],'triangle')
+                self.assertEqual(info['bodies']['/cloth']['body_type'],'shell')
+                self.assertAlmostEqual(info['bodies']['/cloth']['material']['thickness_m'],.001,places=8)
+                self.assertAlmostEqual(info['bodies']['/cloth']['material']['self_friction'],.3,places=7)
+                geometry=engine._usd.slots['/cloth'].geometry()
+                masses=np.asarray(uipc.view(geometry.vertices().find('mass'))).ravel().copy()
+                self.assertAlmostEqual(masses.sum(),.05**2*.001*(1000+750)/2,places=9)
+                rest=engine.get_simulation_positions('/cloth')
+                np.testing.assert_allclose(rest[:,2],1.,atol=1e-8)
+                engine.set_forces([{'vertex':i,'vector':[0,0,mass*9.81]} for i,mass in enumerate(masses)],body='/cloth')
+                for _ in range(100):engine.step(snapshot=False)
+                np.testing.assert_allclose(engine.get_simulation_positions('/cloth'),rest,atol=2e-5)
+                engine.set_forces([],body='/cloth')
+                for _ in range(100):engine.step(snapshot=False)
+                self.assertLess((engine.get_simulation_positions('/cloth')-rest)[:,2].mean(),-.03)
+            finally:engine.close()
+            engine=GenesisEngine(setup,output=Path(folder)/'driven',
+                configure=lambda engine:engine.add_position_drive('/cloth',np.arange(4),1e5))
+            try:
+                target=engine.get_simulation_positions('/cloth')+[0,0,.01]
+                engine.set_position_targets('/cloth',target)
+                for _ in range(100):engine.step(snapshot=False)
+                np.testing.assert_allclose(engine.get_simulation_positions('/cloth'),target,atol=2e-5)
+            finally:engine.close()
 
     def test_paperbag_stage_and_connections(self):
         from app.engine import GenesisEngine

@@ -9,7 +9,7 @@ let objectInfo={},selectedBody='',shownMaterial={};
 function updateBodies(bodies){
  objectInfo=bodies??{};if(!objectInfo[selectedBody])selectedBody='';
  const select=$('body-select');select.replaceChildren();
- for(const [id,text] of [['','全部物体（默认覆盖）'],...Object.entries(objectInfo).map(([id,b])=>[id,id+' · '+b.kind])]){
+ for(const [id,text] of [['','全部物体（默认覆盖）'],...Object.entries(objectInfo).map(([id,b])=>[id,id+' · '+(b.body_type??b.kind)])]){
   const option=document.createElement('option');option.value=id;option.textContent=text;select.append(option);
  }
  select.value=selectedBody;$('body-picker').hidden=!Object.keys(objectInfo).length;
@@ -38,7 +38,8 @@ function showContactCheck(check){
  $('contact-note').title=check.scope;
 }
 function updateMaterialFields(){
- const volume=$('body_type').value==='volume';
+ const info=objectInfo[selectedBody];
+ const volume=(info?.body_type??$('body_type').value)==='volume';
  const mode=$('contact_mode').value;
  $('contact-options').hidden=mode==='none';
  $('contact-mode-note').textContent=mode==='none'?'关闭全部接触：包括地面，软体可穿过自身和地面；材料、固定点和外力求解保留。':mode==='ground_only'?'仅保留地面碰撞与摩擦；关闭自身及其他物体接触，保留 FEM 材料求解。':mode==='no_self'?'关闭同一软体的自碰撞，保留地面与其他物体接触；材料求解保留。':'完整接触：解算自碰撞及与地面、其他物体的接触。各档均使用原有 FEM 材料求解。';
@@ -47,8 +48,7 @@ function updateMaterialFields(){
  for(const id of ['volume_plasticity','volume_yield_strain_percent','volume_plastic_hardening'])$(id).parentElement.hidden=!volume||(id!=='volume_plasticity'&&!$('volume_plasticity').checked);
  $('bending_model').parentElement.hidden=volume;
  $('tet-options').hidden=!volume;
- $('model-name').textContent=projectSpec.models[$('body_type').value];
- const info=objectInfo[selectedBody];
+ $('model-name').textContent=projectSpec.models[info?.body_type??$('body_type').value];
  if(info){
   if(info.kind==='abd')$('model-name').textContent='AffineBody (ABD)';
   for(const id of fields)if(!info.editable_fields.includes(id))$(id).parentElement.hidden=true;
@@ -56,7 +56,8 @@ function updateMaterialFields(){
    $(id).disabled=busy||Boolean(info.unsupported_fields?.[id]);
    if(info.unsupported_fields?.[id])$(id).title=info.unsupported_fields[id];
   }
-  $('bending_model').parentElement.hidden=true;
+  $('bending_model').parentElement.hidden=info.body_type!=='shell';
+  $('bending_model').disabled=busy;
  }
  $('body_type').disabled=Object.keys(objectInfo).length>0;
  $('mass-field').hidden=info?.kind!=='abd';$('clear-body').hidden=!selectedBody;

@@ -2,15 +2,16 @@
 from pathlib import Path
 from contextlib import nullcontext
 import numpy as np
-from pxr import Gf, Usd, UsdShade
+from pxr import Gf, Usd, UsdGeom, UsdShade
 from scipy.spatial import ConvexHull, cKDTree
 import uipc
 from uipc.constitution import (
-    AffineBodyConstitution, ElasticModuli, FiniteElementExternalForce, StableNeoHookean,
+    AffineBodyConstitution, ElasticModuli, ElasticModuli2D, FiniteElementExternalForce,
+    StableNeoHookean, StrainLimitingBaraffWitkinShell,
 )
 from uipc.geometry import ground, label_surface, label_triangle_orient, tetmesh, trimesh
 
-from .attachments import fixed_joint, stitch_points, locate_tets
+from .attachments import fixed_joint, stitch_points, locate_elements
 from .config import Material
 from .materials import resolve_materials, element_material_ids, configure_elements
 
@@ -66,6 +67,25 @@ def _abd_geometry(vertices, mass_kg, fixed=False):
     return geometry
 
 
+def _shell_geometry(vertices, cells, material, fixed=False):
+    cells = np.asarray(cells)
+    if cells.ndim != 2 or cells.shape[1] != 3 or not len(cells) or cells.dtype.kind not in 'iu':
+        raise ValueError('Shell simulation requires nonempty integer (N,3) triangles')
+    if cells.min() < 0 or cells.max() >= len(vertices):
+        raise ValueError('Shell triangle index out of range')
+    edges = vertices[cells[:, 1:]]-vertices[cells[:, :1]]
+    if not np.isfinite(vertices).all() or np.any(np.linalg.norm(np.cross(edges[:, 0], edges[:, 1]), axis=1) < 1e-15):
+        raise ValueError('Nonfinite or degenerate shell geometry')
+    geometry = trimesh(vertices, cells.astype(np.int32))
+    label_surface(geometry)
+    StrainLimitingBaraffWitkinShell().apply_to(geometry,
+        ElasticModuli2D.youngs_poisson(material.youngs_modulus_pa, material.poisson_ratio),
+        mass_density=material.density_kg_m3, thickness=material.thickness_m/2)
+    if fixed:
+        uipc.view(geometry.vertices().find('is_fixed')).reshape(-1)[:] = 1
+    return geometry
+
+
 class UsdImporter:
     """Reuse Genesis parsing and register data in the engine-owned native scene."""
     def __init__(self, filename, scene, config):
@@ -95,11 +115,12 @@ class UsdImporter:
             self._floor_contact.apply_to(floor)
             self.scene.objects().create('__floor__').geometries().create(floor)
         for prim in self.stage.Traverse():
+            shell = 'PhysxDeformableSurfaceAPI' in str(prim.GetMetadata('apiSchemas'))
             if any(name in str(prim.GetMetadata('apiSchemas')) for name in (
                     'DeformableBodyAPI', 'DeformableSurfaceAPI', 'DeformableVolumeAPI')) and not prim.GetAttribute(
-                    'physxDeformable:simulationRestPoints'):
+                    'physxDeformable:simulationRestPoints') and not shell:
                 raise NotImplementedError(f'Unsupported deformable schema: {prim.GetPath()}')
-            if prim.GetAttribute('physxDeformable:simulationRestPoints'):
+            if prim.GetAttribute('physxDeformable:simulationRestPoints') or shell:
                 self._load_body(prim)
         unknown = self.config.bodies.keys()-self.slots.keys()
         if unknown:
@@ -182,16 +203,28 @@ class UsdImporter:
                                              'physics:principalAxes', 'physics:density')]
         if unmapped:
             self.warnings.append(f'{path}: native model replaces {unmapped}')
-        if prim.GetAttribute('physxDeformable:simulationRestPoints'):
+        shell = 'PhysxDeformableSurfaceAPI' in str(prim.GetMetadata('apiSchemas'))
+        if prim.GetAttribute('physxDeformable:simulationRestPoints') or shell:
+            body_type = 'shell' if shell else 'volume'
+            allowed = {'youngs_modulus_pa','poisson_ratio','density_kg_m3','self_friction'}
+            allowed.update({'thickness_m','shear_stiffness_n_m','bending_model','bending_rigidity_nm',
+                'bending_plasticity','bending_yield_angle_deg','bending_plastic_hardening'} if shell else
+                {'volume_plasticity','volume_yield_strain_percent','volume_plastic_hardening'})
             if override is not None:
-                allowed={'youngs_modulus_pa','poisson_ratio','density_kg_m3','self_friction',
-                    'volume_plasticity','volume_yield_strain_percent','volume_plastic_hardening'}
                 if override.mass_kg is not None or override.material.model_fields_set-allowed:
-                    raise ValueError(f'{path}: volume FEM uses E/nu/density/plasticity; mass_kg is ABD-only')
+                    raise ValueError(f'{path}: unsupported {body_type} material override; mass_kg is ABD-only')
             material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial('physics')
-            properties = {key: (_value(material.GetPrim(), 'physxDeformableBodyMaterial:'+name) if material else None)
+            namespace = 'physxDeformableSurfaceMaterial:' if shell else 'physxDeformableBodyMaterial:'
+            properties = {key: (_value(material.GetPrim(), namespace+name) if material else None)
                           for key, name in [('youngs_modulus_pa', 'youngsModulus'),
                                             ('poisson_ratio', 'poissonsRatio'), ('density_kg_m3', 'density')]}
+            if shell and material:
+                thickness = _value(material.GetPrim(), namespace+'thickness')
+                friction = _value(material.GetPrim(), namespace+'dynamicFriction')
+                if thickness is not None:
+                    properties['thickness_m'] = thickness*UsdGeom.GetStageMetersPerUnit(self.stage)
+                if friction is not None:
+                    properties['self_friction'] = friction
             overrides = self.material.model_dump(exclude_unset=True)
             properties.update({key: overrides[key] for key in properties if key in overrides})
             if override is not None:
@@ -199,24 +232,39 @@ class UsdImporter:
                                    if key in properties})
             if any(v is None for v in properties.values()):
                 raise ValueError(f'{path}: USD or JSON overrides must provide E/nu/rho')
-            vertices = self._world_points(prim, _value(prim, 'physxDeformable:simulationRestPoints'))
-            cells = np.asarray(_value(prim, 'physxDeformable:simulationIndices'), np.int32).reshape(-1, 4)
-            geometry = _fem_geometry(vertices, cells, *properties.values())
+            if shell:
+                vertices = self._world_points(prim, _value(prim, 'physxDeformable:restPoints', _value(prim, 'points')))
+                counts = _value(prim, 'faceVertexCounts', [])
+                if not len(counts) or any(count != 3 for count in counts):
+                    raise ValueError(f'{path}: shell simulation mesh must be triangulated')
+                cells = np.asarray(_value(prim, 'faceVertexIndices'), np.int32).reshape(-1, 3)
+                if len(cells) != len(counts):
+                    raise ValueError(f'{path}: inconsistent shell face counts and indices')
+            else:
+                vertices = self._world_points(prim, _value(prim, 'physxDeformable:simulationRestPoints'))
+                cells = np.asarray(_value(prim, 'physxDeformable:simulationIndices'), np.int32).reshape(-1, 4)
             values = self.material.model_dump() | properties
             if override is not None:
                 values.update(override.material.model_dump(exclude_unset=True))
             effective = Material.model_validate(values)
+            geometry = _shell_geometry(vertices, cells, effective) if shell else _fem_geometry(vertices, cells, *properties.values())
             regions = override.material_regions if override is not None else []
             local = self.config.model_copy(update=dict(material=effective, material_regions=regions))
             materials = resolve_materials(local)
-            if any(m.volume_plasticity for m in materials):
+            if not shell and any(m.volume_plasticity for m in materials):
                 from .plasticity import require_volume_backend
                 require_volume_backend()
-            if regions or effective.volume_plasticity:
-                configure_elements(geometry, 'volume', materials, element_material_ids(local, len(cells)))
-            self.body_info[path] = dict(kind='fem', body_type='volume', material=effective.model_dump(),
-                editable_fields=['youngs_modulus_pa','poisson_ratio','density_kg_m3','self_friction',
-                    'volume_plasticity','volume_yield_strain_percent','volume_plastic_hardening'],
+            bending = None
+            if shell and any(m.bending_model for m in materials):
+                import uipc.constitution as constitutions
+                name = 'StrainPlasticDiscreteShellBending' if any(m.bending_model and m.bending_plasticity for m in materials) else 'DiscreteShellBending'
+                if not hasattr(constitutions, name):
+                    raise RuntimeError('当前 libuipc 不支持薄壳折痕，请使用带弯曲塑性扩展的后端')
+                bending = getattr(constitutions, name)()
+            if shell or regions or effective.volume_plasticity:
+                configure_elements(geometry, body_type, materials, element_material_ids(local, len(cells)), bending)
+            self.body_info[path] = dict(kind='fem', body_type=body_type, material=effective.model_dump(),
+                editable_fields=sorted(allowed),
                 element_material_ids=element_material_ids(local, len(cells)).tolist())
             self._densities[path] = properties['density_kg_m3']
             uipc.view(geometry.meta().find('self_collision'))[:] = 1
@@ -320,8 +368,8 @@ class UsdImporter:
             end = source
             ids = nearest[end][1]
             if errors[end] > 1e-8:
-                cells = np.asarray(uipc.view(self.slots[paths[end]].geometry().tetrahedra().topo())).reshape(-1, 4)
-                ids = cells[locate_tets(points[end], vertices[end], cells)].ravel()
+                cells = self.elements(paths[end])
+                ids = cells[locate_elements(points[end], vertices[end], cells)].ravel()
             ids = np.unique(ids).astype(np.int32)
             world = vertices[end][ids]
             offset = np.mean(points[1-end]-points[end], axis=0)
@@ -332,8 +380,7 @@ class UsdImporter:
             # Validate embedded samples before projection; never extrapolate.
             for end in (0, 1):
                 if errors[end] > 1e-8:
-                    cells = np.asarray(uipc.view(self.slots[paths[end]].geometry().tetrahedra().topo())).reshape(-1, 4)
-                    locate_tets(points[end], vertices[end], cells)
+                    locate_elements(points[end], vertices[end], self.elements(paths[end]))
             pairs = np.unique(np.column_stack([item[1] for item in nearest]), axis=0)
             points = [vertices[i][pairs[:, i]] for i in (0, 1)]
             explicit = dict(vertex_ids0=pairs[:, 0], vertex_ids1=pairs[:, 1])
@@ -358,6 +405,12 @@ class UsdImporter:
     @property
     def deformable_paths(self):
         return tuple(self._forces)
+
+    def elements(self, path):
+        geometry = self.slots[path].geometry()
+        shell = self.body_info[path]['body_type'] == 'shell'
+        collection = geometry.triangles() if shell else geometry.tetrahedra()
+        return np.asarray(uipc.view(collection.topo())).reshape(-1, 3 if shell else 4)
 
     def positions(self, path):
         """Copy current solver vertices in world meters, indexed by native node ID."""

@@ -221,7 +221,13 @@ IPC 接触激活距离通过 scene.json 顶层 `contact_d_hat_m` 设置，默认
 
 连接在导入时自动计算，不读取纸袋节点列表：解析 actor 和点对，统一坐标，去除重复点对。一个 USD attachment 结构就是一个区域，不按距离或连接点簇数量拆分；每个结构连接 actor0/actor1 两个物体，但可以包含任意多个连接位置。FEM 端已有节点直接连接；内部点先定位支撑四面体，FEM/ABD 使用支撑顶点集合，在 ABD 上创建同位置参考锚点；ABD/FEM 对称处理。FEM/FEM 的内部点使用明确报告的最近节点对近似；ABD/ABD 使用局部参考点。默认每个 attachment 总刚度1500 N/m，均分到实际节点对，可通过 engine 的 `set_attachment_parameters` 覆盖。纸袋样例将每个 attachment 设为3000 N/m，保持原先每根提手两个1500 N/m 区域的总刚度。没有 attachment 的资产不会因物体靠近而自动粘接。
 
-`attachments` 每个结构返回一条记录：实际节点对、总刚度、每对刚度、最近节点误差和近似标记。它不是对 PhysX 嵌入点约束的无损替代。重合但编号不同的四面体可能对应不同支撑节点，导入不自动焊接它们。USD 局部碰撞过滤目前近似成物体对过滤，并返回提示。当前映射旧 PhysxPhysicsAttachment、authored 四面体 FEM、凸包 ABD 和已装配固定关节；其他物理 schema 明确报告未实现，不声称覆盖全部 USD 物理语义。
+`attachments` 每个结构返回一条记录：实际节点对、总刚度、每对刚度、最近节点误差和近似标记。它不是对 PhysX 嵌入点约束的无损替代。重合但编号不同的四面体可能对应不同支撑节点，导入不自动焊接它们。USD 局部碰撞过滤目前近似成物体对过滤，并返回提示。当前映射旧 PhysxPhysicsAttachment、authored 四面体 FEM、PhysxDeformableSurfaceAPI 三角形 shell、凸包 ABD 和已装配固定关节；不声称覆盖全部 USD 物理语义。
+
+volume、shell、ABD 共用同一套连接 API，支持全部九种有序类型组合。shell 使用 Mesh 的三角形拓扑及 `physxDeformable:restPoints`（未提供时使用 `points`）；材质读取 `physxDeformableSurfaceMaterial:` 的 E、ν、密度、厚度和摩擦，JSON 继续通过 `bodies[路径].material` 覆盖。厚度按 stage 长度单位转为米，JSON 厚度使用米。剪切、弯曲及折痕沿用现有薄壳参数与材质分区逻辑。shell 内部连接点先检查是否落在三角面上；连接 ABD 时展开为三角形支撑顶点，连接另一软体时使用明确报告的最近节点近似。volume 的四面体定位规则保持原样。
+
+同类型互连是两个独立物体的连接；同一软体内部也可以 stitch 不同节点，但不能把节点连接到自身或重复添加同一节点对。同一 ABD 内部没有独立的关节自由度，重合参考点之间的连接只是冗余约束。若两个重合软体节点只有坐标相同、编号不同，USD 的点坐标本身不足以指定是哪一个；Python `stitch_points` 可传显式 `vertex_ids0/1`。
+
+混合 shell/volume 场景的完整状态使用 `element_mesh.kind="mixed"`、`element_mesh.blocks`；每个 block 包含 `body`、`kind`、`elements`（索引全局 `positions`）、`material_ids`。混合时旧的顶层 `elements/material_ids` 为空，避免混用三角形和四面体编号。只有一种软体单元时保留原来的平铺数组，并额外提供 blocks。表面 `positions/faces` 和原 HTTP/WebSocket 消息不变，前端按所选物体类型显示薄壳或体积参数。
 
 `examples/paperbag.py` 仅保留文件入口、固定动作和驱动/接触初始化；没有 REGIONS 或连接节点编号，也不提供外部质量矩阵。袋身质量矩阵由几何和质量自动计算。动作是静置1秒、1～4秒上提25厘米、6～7秒横移5厘米，保持至9秒。从网页导入与随附纸袋 USD 内容相同的文件（包括 ZIP 内该文件），会自动绑定此固定动作；其他 USD 不附带动作。用户的 dt、接触和物体参数不会被例子覆盖。
 

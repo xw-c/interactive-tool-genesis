@@ -128,10 +128,17 @@ class GenesisEngine:
             ids = np.asarray(selection(vertices) if callable(selection) else selection, np.int32)
             if path not in self._usd._forces or not len(ids) or ids.min() < 0 or ids.max() >= len(vertices):
                 raise ValueError('Position drive requires valid FEM node IDs')
-            cells = np.asarray(uipc.view(geometry.tetrahedra().topo())).reshape(-1, 4)
-            edges = np.stack([vertices[cells[:, i]]-vertices[cells[:, 3]] for i in range(3)], axis=-1)
+            cells = self._usd.elements(path)
             masses = np.zeros(len(vertices))
-            np.add.at(masses, cells.ravel(), np.repeat(abs(np.linalg.det(edges))*self._usd._densities[path]/24, 4))
+            if cells.shape[1] == 3:
+                edges = vertices[cells[:, 1:]]-vertices[cells[:, :1]]
+                measure = np.linalg.norm(np.cross(edges[:, 0], edges[:, 1]), axis=1)/2
+                measure *= self._usd.body_info[path]['material']['thickness_m']
+                nodal_mass = measure*self._usd._densities[path]/3
+            else:
+                edges = np.stack([vertices[cells[:, i]]-vertices[cells[:, 3]] for i in range(3)], axis=-1)
+                nodal_mass = abs(np.linalg.det(edges))*self._usd._densities[path]/24
+            np.add.at(masses, cells.ravel(), np.repeat(nodal_mass, cells.shape[1]))
             authored_mass=geometry.vertices().find('mass')
             if authored_mass is not None:
                 actual=np.asarray(uipc.view(authored_mass)).reshape(-1)
@@ -153,7 +160,7 @@ class GenesisEngine:
     def _layout_usd(self):
         """Keep the existing surface numbering/state API for a multi-body asset."""
         import uipc
-        surfaces=[];faces=[];cells=[];positions=[];offset=0
+        surfaces=[];faces=[];blocks=[];positions=[];offset=0
         self.bodies={}
         self._body_slices={}
         for path,slot in self._usd.slots.items():
@@ -174,19 +181,24 @@ class GenesisEngine:
             faces.append(face[mask]+offset)
             self.bodies[path]['face_count']=int(mask.sum())
             if path in self._usd._forces:
-                cells.append(np.asarray(uipc.view(geometry.tetrahedra().topo())).reshape(-1,4)+offset)
+                elements = self._usd.elements(path)+offset
+                blocks.append(dict(body=path,kind='triangle' if elements.shape[1]==3 else 'tetrahedron',
+                    elements=elements.tolist(),material_ids=self.bodies[path]['element_material_ids']))
             offset+=len(x)
         self._positions=np.vstack(positions)
         self.surface_ids=np.asarray(surfaces,np.int64)
         self.faces=np.searchsorted(self.surface_ids,np.vstack(faces))
         self.x=self._positions[self.surface_ids]
-        self.elements=np.vstack(cells) if cells else np.empty((0,4),np.int64)
-        self.element_material_ids=np.zeros(len(self.elements),np.int64)
-        local_ids=[info['element_material_ids'] for info in self.bodies.values() if 'element_material_ids' in info]
-        if local_ids:self.element_material_ids=np.concatenate(local_ids)
+        kinds={block['kind'] for block in blocks}
+        self._element_kind='mixed' if len(kinds)>1 else next(iter(kinds),'tetrahedron')
+        self._element_blocks=blocks
+        self.elements=np.vstack([block['elements'] for block in blocks]) if blocks and len(kinds)==1 else np.empty((0,4),np.int64)
+        self.element_material_ids=np.concatenate([block['material_ids'] for block in blocks]) if len(self.elements) else np.empty(0,np.int32)
         self.force=np.zeros_like(self._positions)
         self.mesh_info=dict(simulation_vertices=offset,surface_vertices=len(self.surface_ids),
-            tetrahedra=len(self.elements),tetrahedralization='authored USD',bodies=list(self._usd.slots))
+            tetrahedra=sum(len(b['elements']) for b in blocks if b['kind']=='tetrahedron'),
+            shell_triangles=sum(len(b['elements']) for b in blocks if b['kind']=='triangle'),
+            tetrahedralization='authored USD',bodies=list(self._usd.slots))
         self.contact_check=contact_check(self.x,self.faces,self.config)
         try:
             from .plasticity import require_volume_backend
@@ -196,6 +208,11 @@ class GenesisEngine:
         for body in self.bodies.values():
             body['unsupported_fields']={} if plasticity_error is None else {
                 key:plasticity_error for key in body['editable_fields'] if key.startswith('volume_')}
+            if body['body_type']=='shell':
+                from uipc import constitution
+                if not hasattr(constitution,'StrainPlasticDiscreteShellBending'):
+                    body['unsupported_fields'].update({key:'当前后端缺少薄壳弯曲塑性扩展' for key in
+                        ('bending_plasticity','bending_yield_angle_deg','bending_plastic_hardening')})
 
     def set_attachment_parameters(self,attachment,stiffness_n_m,*,disable_contact=False):
         self._usd.attachment_options[attachment]=dict(stiffness_n_m=stiffness_n_m,
@@ -413,12 +430,13 @@ class GenesisEngine:
             backend='libuipc CUDA (Genesis USD parser)' if getattr(self,'_usd',None) is not None else 'Genesis CUDA / IPC CUDA',
             contact_mode=self.config.contact_mode,metrics={'step_ms':self.step_ms})
         if mesh:data.update(contact_check=self.contact_check,faces=self.faces.tolist(),config=self.config.model_dump(mode='json'),volume_mesh=self.mesh_info,
-            element_mesh=dict(kind='triangle' if getattr(self,'_usd',None) is None and self.config.body_type=='shell' else 'tetrahedron',
+            element_mesh=dict(kind=self._element_kind if getattr(self,'_usd',None) is not None else 'triangle' if self.config.body_type=='shell' else 'tetrahedron',
                 index_base=0,positions=self._positions.tolist(),
                 elements=self.elements.tolist(),material_ids=self.element_material_ids.tolist(),
                 surface_vertex_ids=self.surface_ids.tolist()),
             mesh=dict(file=self.config.mesh,vertices=len(self.surface_ids),triangles=len(self.faces),index_base=0,units='m',index_source='simulation_surface'))
         if mesh and getattr(self,'_usd',None) is not None:
+            data['element_mesh']['blocks']=self._element_blocks
             data.update(bodies=self.bodies,attachments=[{k:v for k,v in r.items()
                 if k not in ('vertex_ids','anchors_local')} for r in self._usd.attachment_regions],
                 warnings=self._usd.warnings)
