@@ -2,6 +2,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu126
 genesis-world==1.4.1
 pyuipc==0.0.28
+usd-core==26.11
 torch==2.8.0+cu126
 numpy==1.26.4
 scipy==1.15.3

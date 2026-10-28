@@ -1,6 +1,6 @@
 # Genesis 软体工具
 
-输入只有 scene.json 和 OBJ；运行 ./start.ps1，打开 http://127.0.0.1:3000。
+输入为 scene.json 和 OBJ 或 USD 资产；运行 ./start.ps1，打开 http://127.0.0.1:3000。USD 导入与按物体调参见下文。
 
 启动脚本默认使用项目目录中的 .venv/Scripts/python.exe，不依赖开发者机器的路径。首次使用请按下文创建环境并安装依赖。也可运行 ./start.ps1 -GenesisPython <解释器路径>，显式复用已安装所需依赖和 CUDA PyTorch 的环境；启动脚本不会自动安装依赖。已验证的依赖版本为 Genesis 1.4.1、torch 2.8.0+cu126、pyuipc 0.0.28。
 
@@ -181,6 +181,63 @@ IPC 接触激活距离通过 scene.json 顶层 `contact_d_hat_m` 设置，默认
 
 网页配置生效规则：切换薄壳/体积只更新表单，点击「应用设置并重置」后重建场景、归零时间；当前 OBJ 和已填参数保留，不自动导入另一套默认参数。「导入 JSON」读取文件后立即调用 `SimulationAPI.configure(JSON.parse(text))` 重建当前会话，无需再次应用；不会自动保存 scene.json。JSON 的 mesh 是后端项目内已有 OBJ 的路径，不包含或上传 OBJ 数据。
 前端 JSON 导入使用已有 configure 接口，无单独文件上传路由：`await api.configure(JSON.parse(jsonText))`。后端对应 `Simulation.configure(data)`；若要持久化配置，另调用 `api.saveProject(config)`（PUT /api/project）。
+
+## USD 资产与原生连接
+
+现有 OBJ 的 HTTP/WebSocket 接口保持兼容。USD 路径复用 Genesis 的 `UsdContext`、`parse_usd_stage`、`parse_usd_rigid_entity` 和 `parse_prim_geoms`，补充原始四面体 FEM、ABD、attachment 映射。USD 使用 engine 自己管理的一个 libuipc Scene/World，不创建空 Genesis Scene、不替换 coupler 方法，也不声称物体是完整 Genesis Entity。
+
+网页新增「导入 USD / USDZ / ZIP」和物体选择框。选择物体后显示有效材质，选中的物体用黄色高亮；修改后沿用「应用设置并重置」。两个提手可独立调整 E/ν/密度，袋身可调整质量和摩擦。单元材质分区沿用已有结构，通过 JSON 导入；前端只改动明确修改的字段，未填写的材质继续从 USD 继承。可以清除单物体覆盖。
+
+配置仍使用 `Setup/Material/MaterialRegion`，只增加物体路径作用域：
+
+```json
+{
+  "mesh": "runtime/assets/example/PaperBag.usd",
+  "body_type": "volume",
+  "dt": 0.001,
+  "contact_mode": "full",
+  "material": {},
+  "bodies": {
+    "/root/Rope001": {
+      "material": {"youngs_modulus_pa": 750000},
+      "material_regions": [
+        {"name": "region", "elements": [0], "material": {"density_kg_m3": 750}}
+      ]
+    },
+    "/root/PaperBag": {"mass_kg": 0.12}
+  }
+}
+```
+
+覆盖顺序为 USD → 全局明确填写的材质字段 → 物体字段 → 物体内部材质分区。E/ν/ρ 必须由 USD 或覆盖提供。分区单元编号属于所选物体，不是全局合并编号。USD 顶层 `material_regions` 不接受无作用域的单元编号；OBJ 继续保留原含义。ABD 不接受 FEM 参数。物体对摩擦取两端系数的几何平均；地面使用全局摩擦，单物体摩擦覆盖也映射到地面接触对。质量、材质、固定点和拓扑设置通过重建生效并清除历史。
+
+接口增量：
+
+- 原有 `GET/PUT /api/project`、`PUT /api/mesh` 和 `/ws` 的 `configure/step/snapshot/forces/pins` 保持原形式。
+- 新增 `PUT /api/asset?name=PaperBag.usd`，请求体为文件字节；支持 .usd/.usda/.usdc/.usdz/.zip。ZIP 应只有一个位于最浅目录的主 USD，保留贴图相对路径；有外部引用的资产优先用 USDZ/ZIP 打包。压缩包越界路径会被拒绝。
+- `GET /api/project` 和完整 `configure/snapshot` 状态新增 `bodies`、`attachments`、`warnings`。每个 body 包含有效材质、类型、可编辑字段、不支持字段及原因、表面顶点和三角面范围、是否支持点力/固定。
+- 原 `positions/faces/element_mesh` 仍提供合并数组；公开固定点和点力编号继续对应表面数组。运行时不依赖这些合并数组建立连接。
+- Python 仍使用 `GenesisEngine` 的 `step/state/set_forces/get_simulation_positions`；按物体点力可传 `body=USD路径`。脚本不需要序列化每步状态时可用 `step(snapshot=False)`。
+
+连接在导入时自动计算，不读取纸袋节点列表：解析 actor 和点对，统一坐标，去除重复点对。一个 USD attachment 结构就是一个区域，不按距离或连接点簇数量拆分；每个结构连接 actor0/actor1 两个物体，但可以包含任意多个连接位置。FEM 端已有节点直接连接；内部点先定位支撑四面体，FEM/ABD 使用支撑顶点集合，在 ABD 上创建同位置参考锚点；ABD/FEM 对称处理。FEM/FEM 的内部点使用明确报告的最近节点对近似；ABD/ABD 使用局部参考点。默认每个 attachment 总刚度1500 N/m，均分到实际节点对，可通过 engine 的 `set_attachment_parameters` 覆盖。纸袋样例将每个 attachment 设为3000 N/m，保持原先每根提手两个1500 N/m 区域的总刚度。没有 attachment 的资产不会因物体靠近而自动粘接。
+
+`attachments` 每个结构返回一条记录：实际节点对、总刚度、每对刚度、最近节点误差和近似标记。它不是对 PhysX 嵌入点约束的无损替代。重合但编号不同的四面体可能对应不同支撑节点，导入不自动焊接它们。USD 局部碰撞过滤目前近似成物体对过滤，并返回提示。当前映射旧 PhysxPhysicsAttachment、authored 四面体 FEM、凸包 ABD 和已装配固定关节；其他物理 schema 明确报告未实现，不声称覆盖全部 USD 物理语义。
+
+`examples/paperbag.py` 仅保留文件入口、固定动作和驱动/接触初始化；没有 REGIONS 或连接节点编号，也不提供外部质量矩阵。袋身质量矩阵由几何和质量自动计算。动作是静置1秒、1～4秒上提25厘米、6～7秒横移5厘米，保持至9秒。从网页导入与随附纸袋 USD 内容相同的文件（包括 ZIP 内该文件），会自动绑定此固定动作；其他 USD 不附带动作。用户的 dt、接触和物体参数不会被例子覆盖。
+
+不再硬性要求某个 libuipc 版本字符串。stitch 在 World 初始化前显式复制并读回节点对，兼容旧绑定临时数组问题；外力标记兼容新旧属性名。已验证本机 Genesis 1.3.1 配合修复版 pyuipc 0.0.29，以及现有带塑性扩展的 0.0.28 包。也使用已安装的 Genesis 1.4.1 源码，在相同 CPython 3.11/原生环境中验证导入和物理测试；适配其 Stage 上下文管理器及显式 dt 接口。Python 二进制包需要与解释器版本匹配；没有把 CPython 3.11 原生包冒充为 3.12 兼容包。requirements 增加实际验证使用的 usd-core。体积塑性仍需要 native/ 的 v2 扩展；后端没有时前端禁用对应物体的选项，API 明确拒绝，不能默默按弹性运行。现有 OBJ 薄壳及其塑性逻辑保留。
+
+启动时可使用现有 `-UipcPackageDir` 选择兼容的完整原生包（目录直接包含 uipc/）；不修改 site-packages：
+
+```powershell
+./start.ps1 -GenesisPython <Python路径> -UipcPackageDir <原生包目录>
+python examples/paperbag.py --output runtime/paperbag
+$env:IPC_GPU_TEST='1'
+python -m unittest discover -s tests -p test_usd.py -v
+python -m unittest discover -s tests -p test_usd_interface.py -v
+```
+
+测试覆盖自动 USD 四种 FEM/ABD 组合、实际原生材质系数、固定关节、断开对照、错误回滚、纸袋自动导入、单位/坐标转换、力平衡、HTTP 上传、单物体覆盖与分区、保存重载和原有 WebSocket 消息。源码包含 USD 和原引用贴图；上传资产、缓存、截图、视频和报告留在 runtime/ 或工作区输出目录，不提交。
 
 ## 版本管理
 

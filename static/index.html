@@ -3,6 +3,11 @@
 <body>
 <header><div class="brand"><span class="logo">◈</span><strong>SHELL LAB</strong><span class="tag">软体力学实验室</span></div><div class="connection"><span id="led"></span><span id="connection">连接中</span></div><a href="/static/parameter-guide.html" target="_blank" rel="noopener" style="color:var(--accent);white-space:nowrap">调参说明 ↗</a><button id="help">操作说明</button></header>
 <main><aside class="left"><div class="section-head"><h2>实验设置</h2><span>01 / SETUP</span></div>
+<label id="body-picker" hidden>资产物体<select id="body-select"></select></label>
+<label id="mass-field" hidden>刚体质量 / kg<input id="mass-kg" type="number" min="0.000000001" step="any"></label>
+<button id="clear-body" hidden>清除该物体覆盖，恢复继承参数</button>
+<button id="upload-usd">导入 USD / USDZ / ZIP</button><input id="usd-file" type="file" accept=".usd,.usda,.usdc,.usdz,.zip" hidden>
+<p id="attachment-info" class="muted"></p>
 <label>接触模式<select id="contact_mode"><option value="full">完整接触</option><option value="no_self">关闭自碰撞</option><option value="ground_only" selected>仅保留地面接触</option><option value="none">关闭全部接触（含地面）</option></select></label><p id="contact-mode-note" class="muted"></p>
 <label>软体类型<select id="body_type"><option value="shell">薄壳 · Cloth</option><option value="volume">体积 · Elastic</option></select></label><p class="muted">切换类型只更新表单，点击「应用设置并重置」后生效；保留当前 OBJ 和已填参数，不自动加载另一套默认值。</p><p id="capability" class="muted">检查引擎环境…</p>
 <div class="section-head"><h3>材料</h3><span>SI UNITS</span></div><div id="model-fields"></div>

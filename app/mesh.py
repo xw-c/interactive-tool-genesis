@@ -6,9 +6,14 @@ from genesis.utils.mesh import load_mesh as genesis_load_mesh
 ROOT=Path(__file__).resolve().parent.parent
 
 def mesh_path(name):
+    path=asset_path(name)
+    if path.suffix.lower()!='.obj':raise ValueError('此操作需要 OBJ 网格')
+    return path
+
+def asset_path(name):
     path=(ROOT/name).resolve()
-    if not path.is_relative_to(ROOT) or path.suffix.lower()!='.obj':
-        raise ValueError('mesh 必须是项目内的 OBJ 路径')
+    if not path.is_relative_to(ROOT) or path.suffix.lower() not in ('.obj','.usd','.usda','.usdc','.usdz'):
+        raise ValueError('mesh 必须是项目内的 OBJ 或 USD 资产路径')
     if not path.is_file():raise FileNotFoundError(path)
     return path
 

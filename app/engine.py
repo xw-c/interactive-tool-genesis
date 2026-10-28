@@ -1,21 +1,36 @@
 """Native Genesis IPC/CUDA FEM with selectable contact; surface vertices are public."""
 import time
+import os
+from pathlib import Path
 from types import MethodType
 import numpy as np
 import genesis as gs
-from .config import Force
+from .config import Force, Setup
 from .mesh import mesh_path, contact_check
 from .materials import resolve_materials, element_material_ids, configure_elements
 
 class GenesisEngine:
-    def __init__(self,config):
+    def __init__(self,config,*,configure=None,ipc_options=None,output=None,preview=False):
+        config=config if isinstance(config,Setup) else Setup.model_validate(config)
+        self._usd=None
+        self._output=Path(output).resolve() if output is not None else None
+        self._motion=None
+        self._preview=preview
+        if output is not None:
+            for name,suffix in (('GS_CACHE_FILE_PATH','genesis'),('QD_OFFLINE_CACHE_FILE_PATH','quadrants')):
+                directory=Path(output).resolve()/'cache'/suffix
+                directory.mkdir(parents=True,exist_ok=True)
+                os.environ[name]=str(directory)
         self.materials=resolve_materials(config)
-        # Both Genesis kernels and the independent IPC engine use CUDA.
+        # Both Genesis kernels and its IPC coupler use CUDA.
         if not gs._initialized:gs.init(backend=gs.cuda,precision='64',logging_level='warning')
         if gs.backend!=gs.cuda:raise RuntimeError('本工具要求 Genesis CUDA 后端，请在新进程中使用 gs.cuda 初始化')
         self.fem_preconditioner='mas'
         self.fem_preconditioner_fallback_reason=None
         self.config=config;self.time=0.;self.frame=0;self.step_ms=0.;self._failed=False
+        if Path(config.mesh).suffix.lower() in ('.usd','.usda','.usdc','.usdz'):
+            self._init_usd(config,configure,ipc_options)
+            return
         m=config.material;shell=config.body_type=='shell'
         if not shell and any(material.volume_plasticity for material in self.materials):
             from .plasticity import require_volume_backend
@@ -55,6 +70,160 @@ class GenesisEngine:
                 raise RuntimeError('直接 IPC 步进仅支持一个子步')
         except Exception:
             self.close();raise
+
+    def _init_usd(self,config,configure,ipc_options):
+        """Run imported native geometries directly; Genesis is used only for parsing/options."""
+        import uipc
+        from uipc.core import Engine, Scene, World
+        uipc.Logger.set_level(uipc.Logger.Level.Warn)
+        from genesis.engine.couplers.ipc_coupler.utils import build_ipc_scene_config
+        from inspect import signature
+        from .usd import UsdImporter
+        if config.step_mode != 'libuipc':
+            raise ValueError('USD native assets use step_mode=libuipc; Genesis entities are not registered')
+        if config.material_regions:raise ValueError('USD 材质分区请放在 bodies[物体路径].material_regions')
+        options=ipc_options or gs.options.IPCCouplerOptions(contact_d_hat=config.contact_d_hat_m,
+            contact_enable=config.contact_mode!='none',contact_friction_enable=config.contact_mode!='none')
+        dt={'dt':config.dt} if 'dt' in signature(build_ipc_scene_config).parameters else {}
+        native_config=build_ipc_scene_config(options,gs.options.SimOptions(dt=config.dt,gravity=config.gravity),**dt)
+        if 'fem_preconditioner' in native_config['linear_system']:
+            native_config['linear_system']['fem_preconditioner']='mas'
+        native_scene=Scene(native_config)
+        self._usd=UsdImporter((Path(__file__).resolve().parent.parent/config.mesh).resolve(),native_scene,config)
+        self._drive_targets={}
+        if configure is not None:configure(self)
+        try:
+            start=time.perf_counter()
+            self._usd.build(options.contact_resistance)
+            self._configure_usd_drives()
+            self._layout_usd()
+            if self._preview:
+                self.build_seconds=time.perf_counter()-start
+                return
+            for public_id in config.pins:
+                if public_id<0 or public_id>=len(self.surface_ids):raise ValueError('固定点编号超出表面顶点范围')
+                vertex=self.surface_ids[public_id]
+                for path,span in self._body_slices.items():
+                    if span.start<=vertex<span.stop:
+                        if path not in self._usd._forces:raise ValueError('ABD固定应在USD中设置')
+                        uipc.view(self._usd.slots[path].geometry().vertices().find('is_fixed')).reshape(-1)[vertex-span.start]=1
+            folder=self._output or Path(__file__).resolve().parent.parent/'runtime/usd'
+            folder.mkdir(parents=True,exist_ok=True)
+            self._native_engine=Engine('cuda',str(folder))
+            self._world=World(self._native_engine)
+            self._world.init(native_scene)
+            if not self._world.is_valid():raise RuntimeError('Native asset initialization failed')
+            self.build_seconds=time.perf_counter()-start
+            self.set_forces(config.forces)
+        except Exception:
+            self.close();raise
+
+    def _configure_usd_drives(self):
+        from uipc.constitution import SoftPositionConstraint
+        import uipc
+        for path, settings in self._usd.drives.items():
+            geometry = self._usd.slots[path].geometry()
+            vertices = self._usd.positions(path)
+            selection = settings['vertex_ids']
+            ids = np.asarray(selection(vertices) if callable(selection) else selection, np.int32)
+            if path not in self._usd._forces or not len(ids) or ids.min() < 0 or ids.max() >= len(vertices):
+                raise ValueError('Position drive requires valid FEM node IDs')
+            cells = np.asarray(uipc.view(geometry.tetrahedra().topo())).reshape(-1, 4)
+            edges = np.stack([vertices[cells[:, i]]-vertices[cells[:, 3]] for i in range(3)], axis=-1)
+            masses = np.zeros(len(vertices))
+            np.add.at(masses, cells.ravel(), np.repeat(abs(np.linalg.det(edges))*self._usd._densities[path]/24, 4))
+            authored_mass=geometry.vertices().find('mass')
+            if authored_mass is not None:
+                actual=np.asarray(uipc.view(authored_mass)).reshape(-1)
+                if np.all(actual[ids]>0):masses=actual
+            SoftPositionConstraint().apply_to(geometry)
+            flags = uipc.view(geometry.vertices().find('is_constrained')).reshape(-1)
+            flags[:] = 0
+            flags[ids] = 1
+            strength = uipc.view(geometry.vertices().find('strength_ratio')).reshape(-1)
+            strength[:] = 0
+            strength[ids] = settings['stiffness_n_m']/len(ids)*self.config.dt**2/masses[ids]
+            self._usd.drive_nodes[path] = ids
+            self._drive_targets[path] = vertices[ids].copy()
+            def animate(info, path=path, ids=ids, targets=self._drive_targets):
+                target = uipc.view(info.geo_slots()[0].geometry().vertices().find('aim_position')).reshape(-1, 3)
+                target[ids] = targets[path]
+            self._usd.scene.animator().insert(self._usd.scene.objects().find(path)[0], animate)
+
+    def _layout_usd(self):
+        """Keep the existing surface numbering/state API for a multi-body asset."""
+        import uipc
+        surfaces=[];faces=[];cells=[];positions=[];offset=0
+        self.bodies={}
+        self._body_slices={}
+        for path,slot in self._usd.slots.items():
+            geometry=slot.geometry();x=self._usd.positions(path)
+            self._body_slices[path]=slice(offset,offset+len(x));positions.append(x)
+            ids=np.flatnonzero(np.asarray(uipc.view(geometry.vertices().find('is_surf'))).reshape(-1))
+            self.bodies[path]=self._usd.body_info[path] | dict(vertex_start=len(surfaces),
+                vertex_count=len(ids),face_start=sum(len(f) for f in faces),
+                point_force_supported=path in self._usd._forces and path not in self._usd.drives,
+                pin_supported=path in self._usd._forces)
+            surfaces.extend(ids+offset)
+            face=np.asarray(uipc.view(geometry.triangles().topo())).reshape(-1,3).copy()
+            mask=np.asarray(uipc.view(geometry.triangles().find('is_surf'))).reshape(-1)!=0
+            orient=geometry.triangles().find('orient')
+            if orient is not None:
+                reverse=np.asarray(uipc.view(orient)).reshape(-1)<0
+                face[reverse]=face[reverse][:,[0,2,1]]
+            faces.append(face[mask]+offset)
+            self.bodies[path]['face_count']=int(mask.sum())
+            if path in self._usd._forces:
+                cells.append(np.asarray(uipc.view(geometry.tetrahedra().topo())).reshape(-1,4)+offset)
+            offset+=len(x)
+        self._positions=np.vstack(positions)
+        self.surface_ids=np.asarray(surfaces,np.int64)
+        self.faces=np.searchsorted(self.surface_ids,np.vstack(faces))
+        self.x=self._positions[self.surface_ids]
+        self.elements=np.vstack(cells) if cells else np.empty((0,4),np.int64)
+        self.element_material_ids=np.zeros(len(self.elements),np.int64)
+        local_ids=[info['element_material_ids'] for info in self.bodies.values() if 'element_material_ids' in info]
+        if local_ids:self.element_material_ids=np.concatenate(local_ids)
+        self.force=np.zeros_like(self._positions)
+        self.mesh_info=dict(simulation_vertices=offset,surface_vertices=len(self.surface_ids),
+            tetrahedra=len(self.elements),tetrahedralization='authored USD',bodies=list(self._usd.slots))
+        self.contact_check=contact_check(self.x,self.faces,self.config)
+        try:
+            from .plasticity import require_volume_backend
+            require_volume_backend()
+            plasticity_error=None
+        except RuntimeError as exc:plasticity_error=str(exc)
+        for body in self.bodies.values():
+            body['unsupported_fields']={} if plasticity_error is None else {
+                key:plasticity_error for key in body['editable_fields'] if key.startswith('volume_')}
+
+    def set_attachment_parameters(self,attachment,stiffness_n_m,*,disable_contact=False):
+        self._usd.attachment_options[attachment]=dict(stiffness_n_m=stiffness_n_m,
+            disable_contact=disable_contact)
+
+    def add_position_drive(self,body,vertex_ids,stiffness_n_m):
+        """vertex_ids may be an array or a Python selector of initial world positions."""
+        self._usd.drives[body]=dict(vertex_ids=vertex_ids,stiffness_n_m=stiffness_n_m)
+
+    def place_on_ground(self,clearance=None):
+        self._usd.ground_clearance=self.config.contact_d_hat_m if clearance is None else clearance
+
+    def disable_contact(self,left,right):
+        self._usd.disabled_pairs.append((left,right))
+
+    @property
+    def drive_nodes(self):
+        return self._usd.drive_nodes
+
+    def set_position_targets(self,body,positions):
+        positions=np.asarray(positions,float)
+        if positions.shape!=self._drive_targets[body].shape or not np.isfinite(positions).all():
+            raise ValueError('Expected finite position targets for every drive node')
+        self._drive_targets[body]=positions.copy()
+
+    def set_motion(self,motion):
+        """Python example callback; evaluated before each accepted step."""
+        self._motion=motion
 
     def _attach_ipc_inputs(self):
         import uipc
@@ -165,8 +334,29 @@ class GenesisEngine:
         if shear is None:raise RuntimeError('原生薄壳缺少 mu 属性，无法设置剪切刚度，需要更新适配')
         uipc.view(shear)[:]=self.config.material.shear_stiffness_n_m
 
-    def set_forces(self,forces):
+    def set_forces(self,forces,body=None):
         forces=[Force.model_validate(f) for f in forces]
+        if getattr(self,'_usd',None) is not None:
+            if body is not None:
+                self._usd.set_forces(body,np.asarray([f.vertex for f in forces],np.int64),
+                    np.asarray([f.vector for f in forces],float).reshape(-1,3))
+            else:
+                ids=[f.vertex for f in forces]
+                if any(i>=len(self.surface_ids) for i in ids):raise ValueError('受力点编号超出表面顶点范围')
+                values=np.zeros_like(self._positions)
+                if forces:np.add.at(values,self.surface_ids[ids],[f.vector for f in forces])
+                values[self.surface_ids[self.config.pins]]=0
+                for path,span in self._body_slices.items():
+                    local=values[span]
+                    if path in self._usd._forces:
+                        if path in self.drive_nodes:
+                            if np.any(local):raise ValueError('夹持物体请通过set_position_targets驱动')
+                            continue
+                        active=np.flatnonzero(np.any(local!=0,axis=1))
+                        self._usd.set_forces(path,active,local[active])
+                    elif np.any(local):raise NotImplementedError('当前点力接口适用于FEM，ABD点力需单独映射')
+                self.config.forces=forces
+            return self.state()
         ids=[f.vertex for f in forces]
         if any(i>=len(self.surface_ids) for i in ids):raise ValueError('受力点编号超出表面顶点范围')
         force=np.zeros_like(self.force)
@@ -176,16 +366,19 @@ class GenesisEngine:
         self.force=force;self.force_flags=np.any(force!=0,axis=1).astype(np.int32);self.config.forces=forces
         return self.state()
 
-    def step(self):
+    def step(self,*,snapshot=True):
         if self._failed:raise RuntimeError('上一步模拟失败，请重置后再运行')
         start=time.perf_counter()
         try:
-            world=self.scene.sim.coupler._ipc_world
+            if getattr(self,'_motion',None) is not None:self._motion(self,self.time+self.config.dt)
+            world=self._world if getattr(self,'_usd',None) is not None else self.scene.sim.coupler._ipc_world
             if not world.is_valid():raise RuntimeError('IPC 状态无效，请重置后再运行')
+            physics_start=time.perf_counter()
             if self.config.step_mode=='libuipc':
                 world.advance()
                 world.retrieve()
             else:self.scene.step()
+            self.last_step_seconds=time.perf_counter()-physics_start
             if not world.is_valid():raise RuntimeError('IPC 求解失败，请重置后再运行；详见后端日志')
             all_positions=self._read_positions()
             if not np.isfinite(all_positions).all():raise RuntimeError('Genesis 返回非有限状态，请检查材料或时间步并重置')
@@ -195,33 +388,46 @@ class GenesisEngine:
             raise
         self._positions=all_positions;self.x=positions
         self.time+=self.config.dt;self.frame+=1;self.step_ms=(time.perf_counter()-start)*1000
-        return self.state()
+        return self.state() if snapshot else None
 
     def _read_positions(self):
+        if getattr(self,'_usd',None) is not None:
+            return np.vstack([self._usd.positions(path) for path in self._usd.slots])
         if self.config.step_mode=='libuipc':
             import uipc
             transformed,=uipc.geometry.apply_transform(self._ipc_geometry)
             return np.array(transformed.positions().view(),copy=True).reshape(-1,3)
         return self.entity.get_state().pos.detach().cpu().numpy().reshape(-1,3).copy()
 
-    def get_simulation_positions(self):
+    def get_simulation_positions(self,body=None):
         """Copy of the last accepted state, including internal vertices.
 
         Web/API consumers continue to use state()['positions'] (surface only).
         Only genesis_world keeps Genesis entity.get_state() synchronized every frame.
         """
+        if body is not None:return self._usd.positions(body)
         return self._positions.copy()
 
     def state(self,mesh=False):
         data=dict(positions=self.x.tolist(),time=self.time,frame=self.frame,pins=self.config.pins,
-            backend='Genesis CUDA / IPC CUDA',contact_mode=self.config.contact_mode,metrics={'step_ms':self.step_ms})
+            backend='libuipc CUDA (Genesis USD parser)' if getattr(self,'_usd',None) is not None else 'Genesis CUDA / IPC CUDA',
+            contact_mode=self.config.contact_mode,metrics={'step_ms':self.step_ms})
         if mesh:data.update(contact_check=self.contact_check,faces=self.faces.tolist(),config=self.config.model_dump(mode='json'),volume_mesh=self.mesh_info,
-            element_mesh=dict(kind='triangle' if self.config.body_type=='shell' else 'tetrahedron',
+            element_mesh=dict(kind='triangle' if getattr(self,'_usd',None) is None and self.config.body_type=='shell' else 'tetrahedron',
                 index_base=0,positions=self._positions.tolist(),
                 elements=self.elements.tolist(),material_ids=self.element_material_ids.tolist(),
                 surface_vertex_ids=self.surface_ids.tolist()),
             mesh=dict(file=self.config.mesh,vertices=len(self.surface_ids),triangles=len(self.faces),index_base=0,units='m',index_source='simulation_surface'))
+        if mesh and getattr(self,'_usd',None) is not None:
+            data.update(bodies=self.bodies,attachments=[{k:v for k,v in r.items()
+                if k not in ('vertex_ids','anchors_local')} for r in self._usd.attachment_regions],
+                warnings=self._usd.warnings)
         return data
 
     def close(self):
+        if getattr(self,'_usd',None) is not None:
+            self._motion=None
+            self._world=None
+            self._native_engine=None
+            self._usd=None
         if hasattr(self,'scene'):self.scene.destroy()

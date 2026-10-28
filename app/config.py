@@ -48,8 +48,26 @@ class Setup(Input):
     tet_max_volume_m3: Literal[-1] | PositiveFloat=-1
     material: Material=Field(default_factory=Material)
     material_regions: list[MaterialRegion]=Field(default_factory=list)
+    bodies: dict[str,'BodyOverride']=Field(default_factory=dict)
     contact_d_hat_m: PositiveFloat=Field(.0005,title='IPC 接触激活距离 / m')
     dt: PositiveFloat=1/60
     gravity: tuple[float,float,float]=(0,0,-9.81)
     pins: list[int]=Field(default_factory=list)
     forces: list[Force]=Field(default_factory=list)
+
+    @field_serializer('material')
+    def serialize_material(self,value):
+        # USD supplies the base material; serializing defaults would turn them
+        # into explicit overrides on the next load/save cycle.
+        return value.model_dump(exclude_unset=self.mesh.lower().endswith(('.usd','.usda','.usdc','.usdz')))
+
+class BodyOverride(Input):
+    material: Material=Field(default_factory=Material)
+    material_regions: list[MaterialRegion]=Field(default_factory=list)
+    mass_kg: PositiveFloat | None=None
+
+    @field_serializer('material')
+    def serialize_material(self,value):
+        return value.model_dump(exclude_unset=True)
+
+Setup.model_rebuild()

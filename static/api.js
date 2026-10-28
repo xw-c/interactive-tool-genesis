@@ -10,6 +10,10 @@ export class SimulationAPI {
   getProject(){return this.http('/api/project');}
   saveProject(config){return this.http('/api/project','PUT',config);}
   replaceMesh(obj){return this.http('/api/mesh','PUT',{obj});}
+  async replaceAsset(file){
+    const response=await fetch('/api/asset?name='+encodeURIComponent(file.name),{method:'PUT',body:file});
+    const data=await response.json();if(!response.ok)throw Error(data.message??'资产导入失败');return data;
+  }
   connect(onState=()=>{},onConnection=()=>{}){
     return new Promise((resolve,reject)=>{
       this.socket=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
