@@ -68,7 +68,7 @@ let generation=0;let activeConfig=null;let lastFrameAt=null;
 function status(message,error=false){$('status').textContent=message;$('status').classList.toggle('error',error);}
 function playLabel(){lastFrameAt=null;$('play').textContent=playing?'Ⅱ 暂停':'▶ 开始';}
 function pause(){playing=false;playLabel();}
-function setBusy(b){busy=b;for(const id of ['apply','step','reset','import','contact_mode','body_type','contact_d_hat_m','tet_max_volume_m3','upload-obj','save-project','reload-project','body-select','upload-usd','clear-body','mass-kg'])$(id).disabled=b;for(const id of ['bending_model',...fields]){if($(id))$(id).disabled=b;}if(!b&&projectSpec)updateMaterialFields();}
+function setBusy(b){busy=b;for(const id of ['is_acceleration_enabled','apply','step','reset','import','contact_mode','body_type','contact_d_hat_m','tet_max_volume_m3','upload-obj','save-project','reload-project','body-select','upload-usd','clear-body','mass-kg'])$(id).disabled=b;for(const id of ['bending_model',...fields]){if($(id))$(id).disabled=b;}if(!b&&projectSpec)updateMaterialFields();}
 const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));$('canvas').append(renderer.domElement);
 const scene=new THREE.Scene();scene.fog=new THREE.FogExp2(0x0d1722,.65);
 const camera=new THREE.PerspectiveCamera(40,1,.001,10);camera.up.set(0,0,1);camera.position.set(.36,-.46,.37);
@@ -125,7 +125,7 @@ function renderState(s){
  if(s.volume_mesh)$('tet-result').textContent=s.volume_mesh.tetrahedra?(s.volume_mesh.tetrahedralization==='authored USD'?'USD 原始网格：':'Genesis / TetGen：')+s.volume_mesh.simulation_vertices+' 个求解顶点，'+s.volume_mesh.surface_vertices+' 个表面顶点，'+s.volume_mesh.tetrahedra+' 个四面体':'薄壳使用表面三角形';
  positions=s.positions;pins=s.pins;faces=s.faces??faces;
  if(s.faces){activeConfig=s.config;config=structuredClone(s.config);forces=structuredClone(s.config.forces);$('mesh-info').textContent=s.mesh.file+' · '+s.mesh.vertices+' 表面顶点 / '+s.mesh.triangles+' 三角形';rebuild();renderForces();}else updateGeometry();
- if(s.config){const labels={full:'完整接触',no_self:'关闭自碰撞',ground_only:'仅保留地面接触',none:'关闭全部接触（含地面）'};$('solver-badge').textContent='FEM · '+labels[s.config.contact_mode??'ground_only'];$('capability').textContent='Genesis '+projectSpec.genesis_version+' · IPC / CUDA';}
+ if(s.config){const labels={full:'完整接触',no_self:'关闭自碰撞',ground_only:'仅保留地面接触',none:'关闭全部接触（含地面）'};$('solver-badge').textContent='FEM · '+labels[s.config.contact_mode??'ground_only'];$('capability').textContent='Genesis '+projectSpec.genesis_version+' · IPC / CUDA · FP'+s.precision_bits;}
  $('time').textContent=s.time.toFixed(3)+' s';$('frame').textContent=s.frame;$('backend').textContent=s.backend;if(s.frame===0)$('fps').textContent='—';
 }
 async function connect(){
@@ -146,10 +146,11 @@ function readConfig(){
   bodies[selectedBody]={...bodies[selectedBody],material};
   if(objectInfo[selectedBody].kind==='abd'&&+$('mass-kg').value!==objectInfo[selectedBody].mass_kg)bodies[selectedBody].mass_kg=+$('mass-kg').value;
  }
- return {...config,contact_mode:$('contact_mode').value,mesh:config.mesh,body_type:$('body_type').value,tet_max_volume_m3:+$('tet_max_volume_m3').value,...(selectedBody?{}:{material}),...(multi?{bodies}:{}),contact_d_hat_m:+$('contact_d_hat_m').value,dt:+$('dt').value,gravity:[config.gravity[0],config.gravity[1],+$('gravity').value],pins:[...pins],forces:structuredClone(forces)};
+ return {...config,is_acceleration_enabled:$('is_acceleration_enabled').checked,contact_mode:$('contact_mode').value,mesh:config.mesh,body_type:$('body_type').value,tet_max_volume_m3:+$('tet_max_volume_m3').value,...(selectedBody?{}:{material}),...(multi?{bodies}:{}),contact_d_hat_m:+$('contact_d_hat_m').value,dt:+$('dt').value,gravity:[config.gravity[0],config.gravity[1],+$('gravity').value],pins:[...pins],forces:structuredClone(forces)};
 }
 function fillConfig(c){
  config=structuredClone(c);$('body_type').value=c.body_type;
+ $('is_acceleration_enabled').checked=c.is_acceleration_enabled??false;
  $('contact_mode').value=c.contact_mode??'ground_only';
  const material={...(objectInfo[selectedBody]?.material??c.material),...c.bodies?.[selectedBody]?.material};
  shownMaterial=structuredClone(material);
@@ -174,6 +175,7 @@ $('step').onclick=async()=>{pause();generation++;setBusy(true);try{await step();
 $('apply').onclick=()=>{try{configure(readConfig());}catch(e){status(e.message,true);}};
 $('reset').onclick=()=>{if(config)configure({...config,forces:structuredClone(forces),pins:[...pins]});};
 $('body_type').onchange=()=>{updateMaterialFields();$('dirty').textContent='类型尚未应用：请点击「应用设置并重置」。当前 OBJ 和参数保留；体积要求封闭网格，变更模型后请重新选择固定点与受力点。';};
+$('is_acceleration_enabled').onchange=()=>{$('dirty').textContent='优化选项尚未应用：请点击「应用设置并重置」。';};
 $('contact_mode').onchange=()=>{updateMaterialFields();$('dirty').textContent='接触模式尚未应用：请点击「应用设置并重置」。';};
 $('pin').onclick=async()=>{
  if(selected===null||busy)return;pause();generation++;setBusy(true);

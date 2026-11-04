@@ -8,14 +8,9 @@ import uuid
 import zipfile
 from importlib.metadata import version
 from pathlib import Path
-from .config import Setup, Material
+from .config import Setup, Material, PROJECT, read_config
 from .mesh import ROOT, load_mesh, contact_check, asset_path
 from .engine import GenesisEngine
-
-PROJECT=Path(os.environ.get('INTERACTIVE_IPC_PROJECT',ROOT/'scene.json')).resolve()
-
-def read_config():
-    return Setup.model_validate_json(PROJECT.read_text(encoding='utf-8-sig'))
 
 def atomic_write(path,text):
     f=tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=path.parent,delete=False)
@@ -80,7 +75,8 @@ def replace_asset(filename,content):
                 target=roots[0]
             else:target.write_bytes(content)
     else:target.write_bytes(content)
-    config=Setup(mesh=str(target.relative_to(ROOT)),body_type='volume',material={},contact_mode='full',dt=.001)
+    config=Setup(mesh=str(target.relative_to(ROOT)),body_type='volume',material={},contact_mode='full',dt=.001,
+        is_acceleration_enabled=read_config().is_acceleration_enabled)
     # The bundled example owns its scripted motion; generic USD imports have none.
     example=ROOT/'examples/paperbag/PaperBag.usd'
     if hashlib.sha256(target.read_bytes()).digest()==hashlib.sha256(example.read_bytes()).digest():

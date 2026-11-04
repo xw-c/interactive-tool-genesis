@@ -39,11 +39,12 @@ class SolverOptimizationTests(unittest.TestCase):
         import uipc
         from app.config import Setup
         from app.engine import GenesisEngine
-        config=Setup(mesh='benchmarks/shell_1k.obj',contact_mode='none',step_mode='genesis_world',
+        config=Setup(is_acceleration_enabled=uipc.build_info()['float_bytes']==4,
+            mesh='benchmarks/shell_1k.obj',contact_mode='none',step_mode='genesis_world',
             dt=.005,gravity=(0,0,-2))
         for variant in ('default','baseline','hessian','newton5','combined'):
             with self.subTest(variant=variant):
-                accelerated=variant in ('hessian','combined')
+                accelerated=config.is_acceleration_enabled if variant=='default' else variant in ('hessian','combined')
                 limited=variant in ('newton5','combined')
                 options=None if variant=='default' else gs.options.IPCCouplerOptions(
                     is_acceleration_enabled=accelerated,newton_max_iterations=5 if limited else None,

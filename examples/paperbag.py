@@ -41,7 +41,8 @@ def create_engine(usd, config, output):
         setup = setup.model_copy(update=dict(body_type='volume',dt=.001,
             contact_d_hat_m=.0005,contact_mode='full',step_mode='libuipc'))
     setup = setup.model_copy(update={'mesh':str(Path(usd).resolve())})
-    options = gs.options.IPCCouplerOptions(contact_d_hat=setup.contact_d_hat_m,
+    options = gs.options.IPCCouplerOptions(is_acceleration_enabled=setup.is_acceleration_enabled,
+        contact_d_hat=setup.contact_d_hat_m,
         contact_enable=setup.contact_mode!='none',contact_friction_enable=setup.contact_mode!='none',
         contact_resistance=1e8, contact_eps_velocity=.001,
         newton_tolerance=1e-4, newton_semi_implicit_enable=False, linear_system_tolerance=1e-6)

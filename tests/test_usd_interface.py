@@ -17,7 +17,7 @@ class UsdInterfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=root/'runtime') as temporary:
             project=Path(temporary)/'scene.json'
             project.write_text((root/'scene.json').read_text(encoding='utf-8-sig'),encoding='utf-8')
-            with patch.object(interface,'PROJECT',project), TestClient(app) as client:
+            with patch.dict(os.environ,{'INTERACTIVE_IPC_PROJECT':str(project)}), patch('app.config.PROJECT',project), TestClient(app) as client:
                 upload=client.put('/api/asset?name=PaperBag.usd',content=(root/'examples/paperbag/PaperBag.usd').read_bytes())
                 self.assertEqual(upload.status_code,200,upload.text)
                 result=client.get('/api/project')

@@ -28,3 +28,14 @@ for(const mode of ['full','no_self','ground_only','none']){
 ctx.legacy=structuredClone(spec.config);delete ctx.legacy.contact_mode;
 vm.runInContext('fillConfig(legacy)',ctx);assert.equal(get('contact_mode').value,'ground_only');
 console.log('PASS: contact mode visibility, material preservation and JSON round trip');
+
+for(const enabled of [false,true,false]){
+ get('is_acceleration_enabled').checked=enabled;
+ const config=vm.runInContext('readConfig()',ctx);
+ assert.equal(config.is_acceleration_enabled,enabled);
+ ctx.roundtrip=JSON.parse(JSON.stringify(config));vm.runInContext('fillConfig(roundtrip)',ctx);
+ assert.equal(get('is_acceleration_enabled').checked,enabled);
+}
+ctx.legacy=structuredClone(spec.config);delete ctx.legacy.is_acceleration_enabled;
+vm.runInContext('fillConfig(legacy)',ctx);assert.equal(get('is_acceleration_enabled').checked,false);
+console.log('PASS: acceleration checkbox and JSON round trip; legacy default is false');

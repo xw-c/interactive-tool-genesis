@@ -5,6 +5,7 @@ from pathlib import Path
 from types import MethodType
 import numpy as np
 import genesis as gs
+import uipc
 from .config import Force, Setup
 from .mesh import mesh_path, contact_check
 from .materials import resolve_materials, element_material_ids, configure_elements
@@ -23,7 +24,22 @@ class GenesisEngine:
                 os.environ[name]=str(directory)
         self.materials=resolve_materials(config)
         # Both Genesis kernels and its IPC coupler use CUDA.
-        if not gs._initialized:gs.init(backend=gs.cuda,precision='64',logging_level='warning')
+        precision=str(uipc.build_info()['float_bytes']*8)
+        acceleration=os.environ.get('INTERACTIVE_IPC_ACCELERATION_ENABLED')
+        if acceleration is not None and precision!=('32' if acceleration=='1' else '64'):
+            raise RuntimeError('Selected acceleration mode requires FP'+('32' if acceleration=='1' else '64')+'; configure the matching native package and restart the process')
+        if acceleration is not None and config.is_acceleration_enabled!=(acceleration=='1'):
+            raise ValueError('Scene acceleration mode differs from the process; apply settings in a new worker')
+        if ipc_options is None and precision!=('32' if config.is_acceleration_enabled else '64'):
+            raise RuntimeError('Scene acceleration requires a matching native package; start a new simulation worker')
+        if ipc_options is None:
+            ipc_options=gs.options.IPCCouplerOptions(is_acceleration_enabled=config.is_acceleration_enabled,
+                contact_d_hat=config.contact_d_hat_m,contact_enable=config.contact_mode!='none',
+                contact_friction_enable=config.contact_mode!='none')
+        elif acceleration is not None and ipc_options.is_acceleration_enabled!=(acceleration=='1'):
+            raise ValueError('IPC acceleration options disagree with the process startup mode')
+        if not gs._initialized:gs.init(backend=gs.cuda,precision=precision,logging_level='warning')
+        if gs.np_float().itemsize*8!=int(precision):raise RuntimeError('Genesis 与原生 IPC 精度不一致，请重启仿真进程')
         if gs.backend!=gs.cuda:raise RuntimeError('本工具要求 Genesis CUDA 后端，请在新进程中使用 gs.cuda 初始化')
         self.fem_preconditioner='mas'
         self.fem_preconditioner_fallback_reason=None
@@ -36,8 +52,7 @@ class GenesisEngine:
             from .plasticity import require_volume_backend
             require_volume_backend()
         self.scene=gs.Scene(sim_options=gs.options.SimOptions(dt=config.dt,gravity=config.gravity),
-            coupler_options=ipc_options if ipc_options is not None else gs.options.IPCCouplerOptions(contact_d_hat=config.contact_d_hat_m,
-                contact_enable=config.contact_mode!='none',contact_friction_enable=config.contact_mode!='none'),show_viewer=False)
+            coupler_options=ipc_options,show_viewer=False)
         try:
             self.scene.add_entity(gs.morphs.Plane(),material=gs.materials.Rigid(coup_friction=m.self_friction))
             common=dict(E=m.youngs_modulus_pa,nu=m.poisson_ratio,rho=m.density_kg_m3,friction_mu=m.self_friction)
@@ -58,7 +73,7 @@ class GenesisEngine:
             for message in self.contact_check['warnings']:gs.logger.warning(message)
             if any(i<0 or i>=len(self.surface_ids) for i in config.pins):raise ValueError('固定点编号超出表面顶点范围')
             self.config.pins=sorted(set(config.pins))
-            self.force=np.zeros((len(vertices),3),dtype=np.float64)
+            self.force=np.zeros((len(vertices),3),dtype=gs.np_float)
             self.set_forces(config.forces)
             self.mesh_info=dict(simulation_vertices=len(vertices),surface_vertices=len(self.surface_ids),
                 tetrahedra=0 if shell else len(self.entity.elems),tetrahedralization='none' if shell else 'Genesis / TetGen')
@@ -82,8 +97,7 @@ class GenesisEngine:
         if config.step_mode != 'libuipc':
             raise ValueError('USD native assets use step_mode=libuipc; Genesis entities are not registered')
         if config.material_regions:raise ValueError('USD 材质分区请放在 bodies[物体路径].material_regions')
-        options=ipc_options or gs.options.IPCCouplerOptions(contact_d_hat=config.contact_d_hat_m,
-            contact_enable=config.contact_mode!='none',contact_friction_enable=config.contact_mode!='none')
+        options=ipc_options
         dt={'dt':config.dt} if 'dt' in signature(build_ipc_scene_config).parameters else {}
         native_config=build_ipc_scene_config(options,gs.options.SimOptions(dt=config.dt,gravity=config.gravity),**dt)
         if 'fem_preconditioner' in native_config['linear_system']:
@@ -277,7 +291,7 @@ class GenesisEngine:
                 elif bending is not None:
                     bending.apply_to(geometry,m.bending_rigidity_nm,
                         np.deg2rad(m.bending_yield_angle_deg),m.bending_plastic_hardening)
-                external_force.apply_to(geometry,np.zeros(3,dtype=np.float64))
+                external_force.apply_to(geometry,np.zeros(3,dtype=gs.np_float))
                 fixed=geometry.vertices().find(uipc.builtin.is_fixed)
                 if fixed is None:fixed=geometry.vertices().create(uipc.builtin.is_fixed,0)
                 uipc.view(fixed).reshape(-1)[self.surface_ids[self.config.pins]]=1
@@ -408,7 +422,7 @@ class GenesisEngine:
         data=dict(positions=self.x.tolist(),time=self.time,frame=self.frame,pins=self.config.pins,
             backend='libuipc CUDA (Genesis USD parser)' if getattr(self,'_usd',None) is not None else 'Genesis CUDA / IPC CUDA',
             contact_mode=self.config.contact_mode,metrics={'step_ms':self.step_ms})
-        if mesh:data.update(contact_check=self.contact_check,faces=self.faces.tolist(),config=self.config.model_dump(mode='json'),volume_mesh=self.mesh_info,
+        if mesh:data.update(precision_bits=uipc.build_info()['float_bytes']*8,contact_check=self.contact_check,faces=self.faces.tolist(),config=self.config.model_dump(mode='json'),volume_mesh=self.mesh_info,
             element_mesh=dict(kind=self._element_kind if getattr(self,'_usd',None) is not None else 'triangle' if self.config.body_type=='shell' else 'tetrahedron',
                 index_base=0,positions=self._positions.tolist(),
                 elements=self.elements.tolist(),material_ids=self.element_material_ids.tolist(),

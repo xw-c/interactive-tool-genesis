@@ -257,3 +257,6 @@ Git 跟踪后端、网页及 Three.js 许可证、启动脚本、依赖说明、
 Publish that remote branch before running `python -m pip install -r requirements.txt`.
 Genesis's `ipc` extra selects `xw-c/libuipc@ipc-optimized`.
 Use `python run.py --scene path/to/scene.json` for a separate configuration; mesh paths remain relative to this repository.
+
+The UI's `is_acceleration_enabled` option defaults to `false` and is saved in scene JSON. Apply/reset switches the simulation subprocess: false selects FP64 with both pseudo options off; true selects FP32 with both on. The web connection stays open; Newton settings are unchanged.
+Set `INTERACTIVE_IPC_FP32_PACKAGE` and `INTERACTIVE_IPC_FP64_PACKAGE` to the two complete package directories. Selection precedes Genesis import; mismatched packages are rejected. `python run.py --enable-acceleration` supplies the initial default when the scene JSON omits the option.

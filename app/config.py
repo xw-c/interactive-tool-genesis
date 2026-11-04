@@ -1,6 +1,9 @@
 """File/API input types. Only physical and structural constraints are enforced."""
+import json
+import os
+from pathlib import Path
 from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, StrictBool, field_serializer, field_validator
 
 class Input(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
@@ -41,6 +44,7 @@ class MaterialRegion(Input):
         return value.model_dump(exclude_unset=True)
 
 class Setup(Input):
+    is_acceleration_enabled: StrictBool=False
     step_mode: Literal['libuipc','genesis_world']=Field('libuipc',title='步进路径',description='libuipc（默认）：单软体与静态地面直接 IPC 步进，不同步 Genesis 实体状态、计数及回调；genesis_world：完整 Genesis 调度。')
     contact_mode: Literal['full','no_self','ground_only','none']=Field('ground_only',title='接触模式',description='ground_only（默认）：仅保留地面接触，关闭自身及其他物体接触；full：完整接触；no_self：只关闭同一软体的自碰撞；none：包括地面在内关闭全部接触。')
     mesh: str='model.obj'
@@ -71,3 +75,10 @@ class BodyOverride(Input):
         return value.model_dump(exclude_unset=True)
 
 Setup.model_rebuild()
+
+PROJECT=Path(os.environ.get('INTERACTIVE_IPC_PROJECT',Path(__file__).resolve().parent.parent/'scene.json')).resolve()
+
+def read_config():
+    data=json.loads(PROJECT.read_text(encoding='utf-8-sig'))
+    data.setdefault('is_acceleration_enabled',os.environ.get('INTERACTIVE_IPC_ACCELERATION_ENABLED')=='1')
+    return Setup.model_validate(data)
