@@ -157,7 +157,7 @@ configure / snapshot 新增 `element_mesh`：`elements` 的行号就是单元编
 | app/server.py | HTTP / WebSocket 路由与串行工作线程，不实现求解 |
 | app/__init__.py | 当前 Windows 环境兼容与独立缓存目录（含 Numba，避免继承其他项目的旧编译缓存） |
 
-engine.py 不再检查版本必须等于 1.4.4；requirements.txt 记录所复用环境的依赖版本，供新机器部署参考。注册外力需要调用一处 Genesis 内部 IPC 构建接口，升级后该接口可能变化，不保证所有未来版本直接兼容。
+engine.py 不再检查版本必须等于 1.4.4；requirements.txt 指定远程 Genesis 分支及运行依赖，供新机器部署使用。注册外力需要调用一处 Genesis 内部 IPC 构建接口，升级后该接口可能变化，不保证所有未来版本直接兼容。
 
 FiniteElementExternalForce 是 from uipc.constitution 直接导入的类。创建实例、注册到 constitution_tabular、apply_to 物体、写入输入数据，是启用 uipc 内置外力功能；不是安装额外软件。
 
@@ -250,3 +250,10 @@ python -m unittest discover -s tests -p test_usd_interface.py -v
 Git 跟踪后端、网页及 Three.js 许可证、启动脚本、依赖说明、场景配置和回归测试。根目录 model.obj 是本地工作网格，取消跟踪但保留在磁盘；运行当前场景仍需要它，换机或新检出仓库时须自行提供模型或更改 mesh 路径。benchmarks/ 中的新实验、报告及结果只在本地保留，已有回归测试依赖的脚本和网格仍跟踪。本文中的实验报告链接仅供本地查看。
 
 .venv/、runtime/、dist/ 与 Python 缓存不纳入版本管理；这些目录不会被删除。runtime/ 中的日志、矩阵、仿真快照和图表需在本机运行相应实验生成，报告中的 runtime 链接依赖这些本地结果。dist/ 中的 ZIP 是交付产物，其核心程序、网页与测试网格均已作为源文件跟踪。包内 BACKEND.md 的接口内容已包含在根目录 README.md，旧 MANIFEST.sha256 仅适用于该次打包。
+
+## Remote installation
+
+`requirements.txt` installs `genesis-world[ipc]` from `xjr01/genesis-world@ipc-optimized`.
+Publish that remote branch before running `python -m pip install -r requirements.txt`.
+Genesis's `ipc` extra selects `xw-c/libuipc@ipc-optimized`.
+Use `python run.py --scene path/to/scene.json` for a separate configuration; mesh paths remain relative to this repository.

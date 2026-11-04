@@ -45,6 +45,7 @@ class ClothShearTests(unittest.TestCase):
     def test_real_engine_build_and_step(self):
         payload=json.loads((Path(__file__).resolve().parent.parent/'benchmarks/shell_1k.json').read_text())
         payload['gravity']=[0,0,0]
+        payload['forces']=[dict(vertex=0,vector=[0,0,.001])]
         for shear in [8.,80.]:
             with self.subTest(shear=shear):
                 payload['material']['shear_stiffness_n_m']=shear
@@ -56,7 +57,9 @@ class ClothShearTests(unittest.TestCase):
                         np.testing.assert_array_equal(uipc.view(triangles.find('mu')),shear)
                         np.testing.assert_allclose(uipc.view(triangles.find('lambda')),100000*.00025/(1-.25**2))
                         np.testing.assert_array_equal(uipc.view(triangles.find('strain_rate')),100.)
+                    initial=np.array(engine.state()['positions'],copy=True)
                     state=engine.step()
+                    self.assertGreater(np.linalg.norm(np.asarray(state['positions'])-initial,axis=1).max(),1e-9)
                     self.assertEqual(state['frame'],1)
                     self.assertTrue(np.isfinite(state['positions']).all())
                 finally:engine.close()

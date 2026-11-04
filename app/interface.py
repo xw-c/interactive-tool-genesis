@@ -12,7 +12,7 @@ from .config import Setup, Material
 from .mesh import ROOT, load_mesh, contact_check, asset_path
 from .engine import GenesisEngine
 
-PROJECT=ROOT/'scene.json'
+PROJECT=Path(os.environ.get('INTERACTIVE_IPC_PROJECT',ROOT/'scene.json')).resolve()
 
 def read_config():
     return Setup.model_validate_json(PROJECT.read_text(encoding='utf-8-sig'))

@@ -36,7 +36,7 @@ class GenesisEngine:
             from .plasticity import require_volume_backend
             require_volume_backend()
         self.scene=gs.Scene(sim_options=gs.options.SimOptions(dt=config.dt,gravity=config.gravity),
-            coupler_options=gs.options.IPCCouplerOptions(contact_d_hat=config.contact_d_hat_m,
+            coupler_options=ipc_options if ipc_options is not None else gs.options.IPCCouplerOptions(contact_d_hat=config.contact_d_hat_m,
                 contact_enable=config.contact_mode!='none',contact_friction_enable=config.contact_mode!='none'),show_viewer=False)
         try:
             self.scene.add_entity(gs.morphs.Plane(),material=gs.materials.Rigid(coup_friction=m.self_friction))
@@ -281,41 +281,20 @@ class GenesisEngine:
                 fixed=geometry.vertices().find(uipc.builtin.is_fixed)
                 if fixed is None:fixed=geometry.vertices().create(uipc.builtin.is_fixed,0)
                 uipc.view(fixed).reshape(-1)[self.surface_ids[self.config.pins]]=1
-            self._configure_mas(geometries)
-            def animate(info):
+            preconditioner=c._ipc_scene.config().find('linear_system/fem_preconditioner')
+            if preconditioner is None:raise RuntimeError('原生包缺少 FEM 预条件器配置，请更新 libuipc')
+            uipc.view(preconditioner)[0]='mas'
+            force_flag = ('external_force/is_constrained'
+                          if self._ipc_geometry.vertices().find('external_force/is_constrained') is not None
+                          else uipc.builtin.is_constrained)
+            def animate(info, force_flag=force_flag):
                 v=info.geo_slots()[0].geometry().vertices()
                 force=uipc.view(v.find('external_force')).reshape(-1,3)
                 force[:]=self.force
-                uipc.view(v.find(uipc.builtin.is_constrained)).reshape(-1)[:]=self.force_flags
+                uipc.view(v.find(force_flag)).reshape(-1)[:]=self.force_flags
             c._ipc_scene.animator().insert(body,animate)
             self._animate=animate
         c._add_fem_entities_to_ipc=MethodType(add_inputs,c)
-
-    def _configure_mas(self,geometries):
-        import uipc
-        from .plasticity import mas_supports_cuda_graph
-        partition=getattr(uipc.geometry,'mesh_partition',None)
-        reason=None
-        if not callable(partition):reason='原生包缺少 MAS 网格分区接口'
-        elif not mas_supports_cuda_graph():reason='原生包缺少 MAS CUDA stream 修复'
-        elif len(self.config.pins)>=len(self._positions):reason='全部求解顶点均被固定'
-        if reason is None:
-            try:
-                for geometry in geometries:
-                    partition(geometry,16)
-                    parts=geometry.vertices().find('mesh_part')
-                    if parts is None:raise RuntimeError('未生成 mesh_part 属性')
-                    uipc.view(parts).reshape(-1)[self.surface_ids[self.config.pins]]=-1
-            except (RuntimeError,ValueError) as exc:
-                reason='MAS 网格分区失败：'+str(exc)
-        if reason is not None:
-            # No mesh_part means diagonal fallback; remove partial partitioning.
-            for geometry in geometries:
-                if geometry.vertices().find('mesh_part') is not None:
-                    geometry.vertices().destroy('mesh_part')
-            self.fem_preconditioner='diag'
-            self.fem_preconditioner_fallback_reason=reason
-            gs.logger.warning(reason+'；自动使用 diag 预条件器')
 
     def _disable_self_contact(self):
         # Run after Genesis registers pairs, before libuipc World.init().

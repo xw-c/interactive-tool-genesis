@@ -1,8 +1,7 @@
-"""Regression checks for automatic MAS fallback and Genesis stepping."""
+"""Regression checks for native MAS selection and Genesis stepping."""
 import os
 from pathlib import Path
 import unittest
-from types import SimpleNamespace
 from unittest.mock import Mock,patch
 
 
@@ -33,37 +32,37 @@ class SolverOptimizationTests(unittest.TestCase):
                     self.assertEqual(world.advance.call_count,calls)
                 e.scene.step.assert_not_called()
 
-    def test_automatic_mas_and_clean_fallback(self):
+    @unittest.skipUnless(os.environ.get('IPC_CONTACT_GPU_TEST')=='1','Requires CUDA and the project native backend')
+    def test_explicit_ipc_options_reach_native_scene(self):
         import numpy as np
+        import genesis as gs
+        import uipc
+        from app.config import Setup
         from app.engine import GenesisEngine
-        class Vertices:
-            def __init__(self):self.attrs={}
-            def find(self,name):return self.attrs.get(name)
-            def destroy(self,name):del self.attrs[name]
-        for mode in ('supported','missing_partition','old_backend','all_fixed','partition_failure','missing_attribute'):
-            with self.subTest(mode=mode):
-                e=GenesisEngine.__new__(GenesisEngine)
-                e.fem_preconditioner='mas';e.fem_preconditioner_fallback_reason=None
-                e._positions=np.zeros((3,3));e.surface_ids=np.arange(3)
-                e.config=SimpleNamespace(pins=[0,1,2] if mode=='all_fixed' else [0])
-                attrs=[Vertices(),Vertices()]
-                geometries=[SimpleNamespace(vertices=lambda v=v:v) for v in attrs]
-                calls=[]
-                def partition(g,n):
-                    calls.append(g)
-                    if mode=='missing_attribute':return
-                    g.vertices().attrs['mesh_part']=np.zeros(3,dtype=int)
-                    if mode=='partition_failure' and len(calls)==2:raise RuntimeError('test failure')
-                fake=SimpleNamespace(geometry=SimpleNamespace(mesh_partition=None if mode=='missing_partition' else partition),view=lambda a:a)
-                with patch.dict('sys.modules',{'uipc':fake}),patch('app.plasticity.mas_supports_cuda_graph',return_value=mode!='old_backend'),patch('app.engine.gs.logger',Mock()):
-                    e._configure_mas(geometries)
-                self.assertEqual(e.fem_preconditioner,'mas' if mode=='supported' else 'diag')
-                if mode=='supported':
-                    for v in attrs:np.testing.assert_array_equal(v.find('mesh_part'),[-1,0,0])
-                    self.assertIsNone(e.fem_preconditioner_fallback_reason)
-                else:
-                    self.assertTrue(e.fem_preconditioner_fallback_reason)
-                    self.assertTrue(all(v.find('mesh_part') is None for v in attrs))
+        config=Setup(mesh='benchmarks/shell_1k.obj',contact_mode='none',step_mode='genesis_world',
+            dt=.005,gravity=(0,0,-2))
+        for variant in ('default','baseline','hessian','newton5','combined'):
+            with self.subTest(variant=variant):
+                accelerated=variant in ('hessian','combined')
+                limited=variant in ('newton5','combined')
+                options=None if variant=='default' else gs.options.IPCCouplerOptions(
+                    is_acceleration_enabled=accelerated,newton_max_iterations=5 if limited else None,
+                    is_strict=False,contact_enable=False,contact_friction_enable=False,contact_d_hat=.0007)
+                engine=GenesisEngine(config,ipc_options=options)
+                try:
+                    native=engine.scene.sim.coupler._ipc_scene.config()
+                    expected={'fem/bending/pseudo':int(accelerated),'contact/friction/pseudo':int(accelerated),
+                        'newton/max_iter':5 if limited else 1024,'contact/enable':0,
+                        'contact/d_hat':config.contact_d_hat_m if options is None else options.contact_d_hat}
+                    for key,value in expected.items():
+                        self.assertAlmostEqual(float(uipc.view(native.find(key))[0]),value,msg=key)
+                    initial=engine.get_simulation_positions()
+                    engine.step(snapshot=False)
+                    positions=engine.get_simulation_positions()
+                    self.assertTrue(np.isfinite(positions).all())
+                    self.assertTrue(np.all(positions[:,2]<initial[:,2]))
+                    self.assertEqual(engine.frame,1)
+                finally:engine.close()
 
     @staticmethod
     def geometry(engine):
@@ -86,10 +85,8 @@ class SolverOptimizationTests(unittest.TestCase):
         import numpy as np
         from app.config import Setup
         from app.engine import GenesisEngine
-        from app.plasticity import mas_supports_cuda_graph
         import uipc
         from genesis.engine.couplers.ipc_coupler import coupler
-        self.assertTrue(mas_supports_cuda_graph(),'Test requires the MAS stream fix')
         for body in ('shell','volume'):
             with self.subTest(body=body):
                 config=Setup.model_validate_json((Path(__file__).resolve().parents[1]/f'benchmarks/{body}_1k.json').read_text())
@@ -100,9 +97,9 @@ class SolverOptimizationTests(unittest.TestCase):
                     graph=engine.scene.sim.coupler._ipc_scene.config().find('linear_system/use_cuda_graph')
                     self.assertEqual(int(uipc.view(graph)[0]),1)
                     initial=engine.x.copy()
-                    parts=np.asarray(uipc.view(self.geometry(engine).vertices().find('mesh_part'))).reshape(-1)
-                    self.assertTrue(np.any(parts>=0))
-                    np.testing.assert_array_equal(parts[engine.surface_ids[config.pins]],[-1,-1])
+                    native=engine.scene.sim.coupler._ipc_scene.config()
+                    self.assertEqual(uipc.view(native.find('linear_system/fem_preconditioner'))[0],'mas')
+                    self.assertIsNone(self.geometry(engine).vertices().find('mesh_part'))
                     for _ in range(5):engine.step()
                     graph_result=engine.get_simulation_positions()
                     np.testing.assert_array_equal(engine.x[config.pins],initial[config.pins])
@@ -124,39 +121,6 @@ class SolverOptimizationTests(unittest.TestCase):
                     np.testing.assert_allclose(engine.get_simulation_positions(),graph_result,rtol=0,atol=5e-6)
                     np.testing.assert_array_equal(engine.x[config.pins],initial[config.pins])
                 finally:engine.close()
-
-    @unittest.skipUnless(os.environ.get('IPC_CONTACT_GPU_TEST')=='1','Requires CUDA and the project native backend')
-    def test_unsupported_mas_automatically_runs_diag(self):
-        import numpy as np
-        import uipc
-        from app.config import Setup
-        from app.engine import GenesisEngine
-        original_partition=uipc.geometry.mesh_partition
-        for body in ('shell','volume'):
-            for failure in ('old_backend','missing_partition','partial_partition'):
-                with self.subTest(body=body,failure=failure):
-                    config=Setup.model_validate_json((Path(__file__).resolve().parents[1]/f'benchmarks/{body}_1k.json').read_text())
-                    config.pins=[0,1];config.step_mode='genesis_world';calls=[]
-                    def partial(geometry,n):
-                        original_partition(geometry,n);calls.append(geometry)
-                        if len(calls)==2:raise RuntimeError('Injected failure on rest geometry')
-                    if failure=='old_backend':context=patch('app.plasticity.mas_supports_cuda_graph',return_value=False)
-                    elif failure=='missing_partition':context=patch.object(uipc.geometry,'mesh_partition',None)
-                    else:context=patch.object(uipc.geometry,'mesh_partition',partial)
-                    with context:engine=GenesisEngine(config)
-                    try:
-                        self.assertEqual(engine.fem_preconditioner,'diag')
-                        self.assertTrue(engine.fem_preconditioner_fallback_reason)
-                        c=engine.scene.sim.coupler;name=('cloth' if body=='shell' else 'fem')+'_0_0'
-                        obj=c._ipc_objects.find(name)[0]
-                        for slot in c._ipc_scene.geometries().find(obj.geometries().ids()[0]):
-                            self.assertIsNone(slot.geometry().vertices().find('mesh_part'))
-                        initial=engine.x.copy()
-                        for _ in range(3):engine.step()
-                        np.testing.assert_array_equal(engine.x[config.pins],initial[config.pins])
-                        np.testing.assert_array_equal(engine.entity.get_state().pos.detach().cpu().numpy().reshape(-1,3),engine.get_simulation_positions())
-                        self.assertTrue(np.isfinite(engine.x).all())
-                    finally:engine.close()
 
 
 if __name__=='__main__':unittest.main()
