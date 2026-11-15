@@ -1,6 +1,6 @@
 """File/API input types. Only physical and structural constraints are enforced."""
 from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, field_serializer, field_validator, model_serializer
 
 class Input(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
@@ -69,5 +69,11 @@ class BodyOverride(Input):
     @field_serializer('material')
     def serialize_material(self,value):
         return value.model_dump(exclude_unset=True)
+
+    @model_serializer(mode='wrap')
+    def serialize_overrides(self,handler):
+        # An omitted region list inherits USD; an explicit [] clears it.
+        return {key:value for key,value in handler(self).items()
+                if key=='material' or key in self.model_fields_set}
 
 Setup.model_rebuild()

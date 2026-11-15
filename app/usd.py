@@ -2,7 +2,7 @@
 from pathlib import Path
 from contextlib import nullcontext
 import numpy as np
-from pxr import Gf, Usd, UsdGeom, UsdShade
+from pxr import Gf, Usd, UsdGeom, UsdShade, UsdPhysics
 from scipy.spatial import ConvexHull, cKDTree
 import uipc
 from uipc.constitution import (
@@ -12,7 +12,7 @@ from uipc.constitution import (
 from uipc.geometry import ground, label_surface, label_triangle_orient, tetmesh, trimesh
 
 from .attachments import fixed_joint, stitch_points, locate_elements
-from .config import Material
+from .config import Material, MaterialRegion
 from .materials import resolve_materials, element_material_ids, configure_elements
 
 
@@ -20,6 +20,38 @@ def _value(prim, name, default=None):
     attribute = prim.GetAttribute(name)
     result = attribute.Get() if attribute else None
     return default if result is None else result
+
+
+def _material_values(prim, shell=False):
+    """Read standard/PhysX material fields and all existing Material custom fields."""
+    if not prim:
+        return {}
+    values = {}
+    stage = prim.GetStage()
+    scale = UsdGeom.GetStageMetersPerUnit(stage)
+    density = _value(prim, 'physics:density')
+    if density is not None and density > 0:
+        values['density_kg_m3'] = density*UsdPhysics.GetStageKilogramsPerUnit(stage)/scale**3
+    friction = _value(prim, 'physics:dynamicFriction')
+    if friction is not None:
+        values['self_friction'] = friction
+    namespace = 'physxDeformableSurfaceMaterial:' if shell else 'physxDeformableBodyMaterial:'
+    fields = dict(youngs_modulus_pa='youngsModulus',poisson_ratio='poissonsRatio',
+                  density_kg_m3='density',self_friction='dynamicFriction')
+    for key, name in fields.items():
+        value = _value(prim, namespace+name)
+        if value is not None:
+            values[key] = value
+    if shell:
+        thickness = _value(prim, namespace+'thickness')
+        if thickness is not None:
+            values['thickness_m'] = thickness*scale
+    for key in Material.model_fields:
+        value = _value(prim, 'interactiveIpc:'+key)
+        if value is not None:
+            values[key] = None if key=='bending_model' and value=='' else value
+    # Validate after USD/JSON composition so an explicit override can repair a value.
+    return values
 
 
 def _fem_geometry(vertices, cells, E, nu, rho, fixed=False):
@@ -139,8 +171,7 @@ class UsdImporter:
         for left, right in self.disabled_pairs:
             self.scene.contact_tabular().insert(self._contacts[left], self._contacts[right], 0., 0., False)
         for left in self.slots:
-            override=self.config.bodies.get(left)
-            if self._floor_contact is not None and override is not None and 'self_friction' in override.material.model_fields_set:
+            if self._floor_contact is not None and self.body_info[left]['material']['self_friction']!=self.material.self_friction:
                 friction=float(np.sqrt(self.body_info[left]['material']['self_friction']*self.material.self_friction))
                 self.scene.contact_tabular().insert(self._contacts[left],self._floor_contact,
                     friction,contact_resistance,self.config.contact_mode!='none')
@@ -193,17 +224,45 @@ class UsdImporter:
             raise ValueError(f'Genesis produced no geometry for {actor.GetPath()}')
         return np.vstack(pieces)
 
+    def _load_regions(self, prim, shell):
+        """Use face material subsets for shells, or explicit simulation-cell indices."""
+        regions = []
+        inherited, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial('physics')
+        for child in prim.GetChildren():
+            indices = _value(child, 'interactiveIpc:elements')
+            explicit = indices is not None
+            if not explicit:
+                if (not shell or not child.IsA(UsdGeom.Subset) or
+                        _value(child,'familyName')!='materialBind' or _value(child,'elementType')!='face'):
+                    continue
+                indices = _value(child, 'indices', [])
+            material, relationship = UsdShade.MaterialBindingAPI(child).ComputeBoundMaterial('physics')
+            # Inherited body material already contributes through the effective base.
+            values = (_material_values(material.GetPrim(), shell) if material and
+                      (material!=inherited or relationship and relationship.GetPrim()==child) else {})
+            values.update(_material_values(child, shell))
+            values.pop('self_friction', None)  # Contacts are configured per body, not per element.
+            if values or explicit:
+                regions.append(MaterialRegion(name=child.GetName(),elements=list(indices),material=values))
+        return regions
+
     def _load_body(self, prim, link=None, joints=None, geometries=None):
         path = str(prim.GetPath())
         override = self.config.bodies.get(path)
+        shell = 'PhysxDeformableSurfaceAPI' in str(prim.GetMetadata('apiSchemas'))
+        material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial('physics')
+        properties = _material_values(material.GetPrim(), shell) if material else {}
+        properties.update(_material_values(prim, shell))
+        properties.update(self.material.model_dump(exclude_unset=True))
+        if override is not None:
+            properties.update(override.material.model_dump(exclude_unset=True))
         unmapped = [str(a.GetName()) for a in prim.GetAuthoredAttributes() if
                     (str(a.GetName()).startswith(('physxRigidBody:', 'physxDeformable:'))
                      and str(a.GetName()) not in ('physxDeformable:simulationRestPoints', 'physxDeformable:simulationIndices'))
                     or str(a.GetName()) in ('physics:diagonalInertia', 'physics:centerOfMass',
-                                             'physics:principalAxes', 'physics:density')]
+                                             'physics:principalAxes')]
         if unmapped:
             self.warnings.append(f'{path}: native model replaces {unmapped}')
-        shell = 'PhysxDeformableSurfaceAPI' in str(prim.GetMetadata('apiSchemas'))
         if prim.GetAttribute('physxDeformable:simulationRestPoints') or shell:
             body_type = 'shell' if shell else 'volume'
             allowed = {'youngs_modulus_pa','poisson_ratio','density_kg_m3','self_friction'}
@@ -213,25 +272,6 @@ class UsdImporter:
             if override is not None:
                 if override.mass_kg is not None or override.material.model_fields_set-allowed:
                     raise ValueError(f'{path}: unsupported {body_type} material override; mass_kg is ABD-only')
-            material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial('physics')
-            namespace = 'physxDeformableSurfaceMaterial:' if shell else 'physxDeformableBodyMaterial:'
-            properties = {key: (_value(material.GetPrim(), namespace+name) if material else None)
-                          for key, name in [('youngs_modulus_pa', 'youngsModulus'),
-                                            ('poisson_ratio', 'poissonsRatio'), ('density_kg_m3', 'density')]}
-            if shell and material:
-                thickness = _value(material.GetPrim(), namespace+'thickness')
-                friction = _value(material.GetPrim(), namespace+'dynamicFriction')
-                if thickness is not None:
-                    properties['thickness_m'] = thickness*UsdGeom.GetStageMetersPerUnit(self.stage)
-                if friction is not None:
-                    properties['self_friction'] = friction
-            overrides = self.material.model_dump(exclude_unset=True)
-            properties.update({key: overrides[key] for key in properties if key in overrides})
-            if override is not None:
-                properties.update({key: value for key, value in override.material.model_dump(exclude_unset=True).items()
-                                   if key in properties})
-            if any(v is None for v in properties.values()):
-                raise ValueError(f'{path}: USD or JSON overrides must provide E/nu/rho')
             if shell:
                 vertices = self._world_points(prim, _value(prim, 'physxDeformable:restPoints', _value(prim, 'points')))
                 counts = _value(prim, 'faceVertexCounts', [])
@@ -243,12 +283,20 @@ class UsdImporter:
             else:
                 vertices = self._world_points(prim, _value(prim, 'physxDeformable:simulationRestPoints'))
                 cells = np.asarray(_value(prim, 'physxDeformable:simulationIndices'), np.int32).reshape(-1, 4)
-            values = self.material.model_dump() | properties
-            if override is not None:
-                values.update(override.material.model_dump(exclude_unset=True))
-            effective = Material.model_validate(values)
-            geometry = _shell_geometry(vertices, cells, effective) if shell else _fem_geometry(vertices, cells, *properties.values())
-            regions = override.material_regions if override is not None else []
+            regions = (override.material_regions if override is not None and 'material_regions' in override.model_fields_set
+                       else self._load_regions(prim, shell))
+            missing = {'youngs_modulus_pa','poisson_ratio','density_kg_m3'}-properties.keys()
+            if missing:
+                # A fully partitioned mesh may bind materials only on its subsets.
+                region_config = self.config.model_copy(update=dict(material_regions=regions))
+                coverage = element_material_ids(region_config,len(cells))
+                if not regions or np.any(coverage==0) or any(not missing <= region.material.model_fields_set for region in regions):
+                    raise ValueError(f'{path}: USD or JSON overrides must provide E/nu/rho for every element')
+                for key,value in regions[0].material.model_dump(exclude_unset=True).items():
+                    properties.setdefault(key,value)
+            effective = Material.model_validate(self.material.model_dump() | properties)
+            geometry = _shell_geometry(vertices, cells, effective) if shell else _fem_geometry(vertices, cells,
+                effective.youngs_modulus_pa,effective.poisson_ratio,effective.density_kg_m3)
             local = self.config.model_copy(update=dict(material=effective, material_regions=regions))
             materials = resolve_materials(local)
             if not shell and any(m.volume_plasticity for m in materials):
@@ -265,28 +313,28 @@ class UsdImporter:
                 configure_elements(geometry, body_type, materials, element_material_ids(local, len(cells)), bending)
             self.body_info[path] = dict(kind='fem', body_type=body_type, material=effective.model_dump(),
                 editable_fields=sorted(allowed),
+                material_regions=[region.model_dump() for region in regions],
                 element_material_ids=element_material_ids(local, len(cells)).tolist())
-            self._densities[path] = properties['density_kg_m3']
+            self._densities[path] = effective.density_kg_m3
             uipc.view(geometry.meta().find('self_collision'))[:] = 1
             if path not in self.drives:
                 FiniteElementExternalForce().apply_to(geometry, np.zeros(3))
             self._forces[path] = np.zeros_like(vertices)
         else:
+            effective = Material.model_validate(self.material.model_dump() | properties)
             fixed = link['parent_idx'] < 0 and all(j['type'] == self._gs.JOINT_TYPE.FIXED for j in joints)
-            mass = link.get('inertial_mass')
+            mass = _value(prim, 'interactiveIpc:mass_kg', link.get('inertial_mass'))
             if override is not None and override.mass_kg is not None:
                 mass = override.mass_kg
             if mass is None:
                 raise ValueError(f'{path}: explicit physics:mass required for native ABD')
             geometry = _abd_geometry(self._mesh_vertices(prim, geometries), mass, fixed)
-            effective = self.material.model_dump()
             if override is not None:
                 unsupported = override.material.model_fields_set-{'self_friction'}
                 if unsupported or override.material_regions:
                     raise ValueError(f'{path}: ABD supports mass_kg and self_friction, not FEM material fields')
-                effective.update(override.material.model_dump(exclude_unset=True))
             self.body_info[path] = dict(kind='abd', body_type='rigid', mass_kg=float(mass),
-                material=effective, editable_fields=['self_friction'])
+                material=effective.model_dump(), editable_fields=['self_friction'])
         contact = self.scene.contact_tabular().create(path)
         contact.apply_to(geometry)
         self._contacts[path] = contact
@@ -349,7 +397,7 @@ class UsdImporter:
         paths = [str(t[0]) for t in targets]
         left, right = [self.slots[path] for path in paths]
         options = self.attachment_options.get(str(prim.GetPath()), {})
-        total = float(options.get('stiffness_n_m', 1500.))
+        total = float(options.get('stiffness_n_m', _value(prim,'interactiveIpc:stiffness_n_m',1500.)))
         points = [self._world_points(self.stage.GetPrimAtPath(paths[i]), _value(prim, f'points{i}'))
                   for i in (0, 1)]
         if points[0].shape != points[1].shape or points[0].ndim != 2 or points[0].shape[1] != 3 or not len(points[0]):
@@ -396,7 +444,7 @@ class UsdImporter:
                 anchors_local=np.asarray(uipc.view(self.slots[paths[1-source]].geometry().positions())).reshape(-1, 3)[pairs[:, 1-source]].copy())
         self.attachment_regions.append(record)
         filtered = any(len(_value(prim, f'collisionFilterIndices{i}', [])) for i in (0, 1))
-        if options.get('disable_contact', False) or filtered:
+        if options.get('disable_contact', _value(prim,'interactiveIpc:disable_contact',False)) or filtered:
             self.disabled_pairs.append(tuple(paths))
             if filtered:
                 self.warnings.append(f'{prim.GetPath()}: local USD contact filter approximated by whole-body exclusion')

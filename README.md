@@ -225,6 +225,28 @@ IPC 接触激活距离通过 scene.json 顶层 `contact_d_hat_m` 设置，默认
 
 volume、shell、ABD 共用同一套连接 API，支持全部九种有序类型组合。shell 使用 Mesh 的三角形拓扑及 `physxDeformable:restPoints`（未提供时使用 `points`）；材质读取 `physxDeformableSurfaceMaterial:` 的 E、ν、密度、厚度和摩擦，JSON 继续通过 `bodies[路径].material` 覆盖。厚度按 stage 长度单位转为米，JSON 厚度使用米。剪切、弯曲及折痕沿用现有薄壳参数与材质分区逻辑。shell 内部连接点先检查是否落在三角面上；连接 ABD 时展开为三角形支撑顶点，连接另一软体时使用明确报告的最近节点近似。volume 的四面体定位规则保持原样。
 
+USD 材质参数也可以完整使用 `interactiveIpc:<Material字段名>` 自定义属性：支持现有 Material 的全部字段，包括剪切、弯曲、塑性开关、屈服参数、硬化及摩擦；不增加另一套材质数据结构。属性放在绑定的 `UsdShade.Material` 上，或直接放在物体 prim 上作为覆盖。数值单位与 JSON 相同（Pa、米、kg/m³、角度为度、参考屈服形变为百分数）；`bending_model` 使用 token `"DiscreteShellBending"` 或空 token `""`（关闭弯曲），布尔开关使用 bool。现有标准／PhysX 字段仍可读取；标准 `physics:density` 按 stage 的质量、长度单位换算，PhysX 字段沿用原有映射。明确填写的自定义属性优先于同一 prim 的标准／PhysX 属性，未知自定义字段忽略。
+
+```usda
+def Material "PlasticPaper"
+{
+    custom double interactiveIpc:youngs_modulus_pa = 500000
+    custom double interactiveIpc:poisson_ratio = 0.2
+    custom double interactiveIpc:density_kg_m3 = 500
+    custom bool interactiveIpc:volume_plasticity = true
+    custom double interactiveIpc:volume_yield_strain_percent = 3.5
+    custom double interactiveIpc:volume_plastic_hardening = 0.2
+}
+```
+
+该材质通过 `material:binding:physics`（也兼容 all-purpose 绑定）绑定到物体。基础材质优先级为绑定材质 → 物体自身属性 → JSON 全局显式 material → JSON 按物体显式 material。已知参数仍通过现有 Material 校验；塑性开关实际选择同一个原生塑性后端，不是只保留字段。缺少后端能力时明确报错。
+
+shell 的按面材质支持 `familyName="materialBind"`、`elementType="face"` 的 UsdGeomSubset。volume 的四面体区域，以及希望直接使用仿真单元编号的 shell 区域，可在物体直接子 prim（例如 Scope）上写 `custom int[] interactiveIpc:elements = [0, 2]`，再绑定该区域的物理材质，或在子 prim 上直接写材质自定义属性。volume 编号对应 authored `simulationIndices` 四元组的行号，shell 编号对应三角形行号；不改变拓扑。区域显式参数覆盖基础材质，未填字段继承基础材质。区域重叠或越界会报错；摩擦仍按物体配置，不按单元配置。
+
+JSON 中省略某物体的 `material_regions` 时继续使用 USD 区域；显式提供列表时完整替换该物体的 USD 区域，`[]` 表示清除。保存／加载 JSON 保留这个区别。完整状态 `bodies[路径].material_regions` 返回实际生效的区域，配置中的 `bodies` 继续只记录用户覆盖。若没有基础材质，缺少的 E/ν/ρ 必须由每个区域提供，且区域必须覆盖全部单元；使用首区参数作为几何体初始化基准，再应用实际单元材质。ABD 可在物体 prim 上使用 `interactiveIpc:mass_kg` 提供质量，JSON `mass_kg` 可覆盖它；刚体物理材质的动态摩擦也会读取。
+
+attachment prim 可写 `custom double interactiveIpc:stiffness_n_m = 3000`（该结构总刚度，均分到节点对）及 `custom bool interactiveIpc:disable_contact = true`（关闭该物体对接触）。缺省保持1500 N/m；显式的 Python `set_attachment_parameters()` 设置优先于 USD，纸袋样例的既有设置保留。本节补齐的是资产材质和连接参数读取，运行时间步、重力、接触模式仍通过现有 Setup/Python 配置；没有新增 USD 导出按钮。
+
 同类型互连是两个独立物体的连接；同一软体内部也可以 stitch 不同节点，但不能把节点连接到自身或重复添加同一节点对。同一 ABD 内部没有独立的关节自由度，重合参考点之间的连接只是冗余约束。若两个重合软体节点只有坐标相同、编号不同，USD 的点坐标本身不足以指定是哪一个；Python `stitch_points` 可传显式 `vertex_ids0/1`。
 
 混合 shell/volume 场景的完整状态使用 `element_mesh.kind="mixed"`、`element_mesh.blocks`；每个 block 包含 `body`、`kind`、`elements`（索引全局 `positions`）、`material_ids`。混合时旧的顶层 `elements/material_ids` 为空，避免混用三角形和四面体编号。只有一种软体单元时保留原来的平铺数组，并额外提供 blocks。表面 `positions/faces` 和原 HTTP/WebSocket 消息不变，前端按所选物体类型显示薄壳或体积参数。
