@@ -6,6 +6,7 @@ from types import MethodType
 import numpy as np
 import genesis as gs
 from .config import Force, Setup
+from .forces import add_force, surface_vertex_areas
 from .mesh import mesh_path, contact_check
 from .materials import resolve_materials, element_material_ids, configure_elements
 
@@ -39,7 +40,6 @@ class GenesisEngine:
             coupler_options=gs.options.IPCCouplerOptions(contact_d_hat=config.contact_d_hat_m,
                 contact_enable=config.contact_mode!='none',contact_friction_enable=config.contact_mode!='none'),show_viewer=False)
         try:
-            self.scene.add_entity(gs.morphs.Plane(),material=gs.materials.Rigid(coup_friction=m.self_friction))
             common=dict(E=m.youngs_modulus_pa,nu=m.poisson_ratio,rho=m.density_kg_m3,friction_mu=m.self_friction)
             material=gs.materials.FEM.Cloth(**common,thickness=m.thickness_m/2,
                 bending_stiffness=m.bending_rigidity_nm if m.bending_model and not m.bending_plasticity and not config.material_regions else None) if shell else gs.materials.FEM.Elastic(**common)
@@ -47,6 +47,12 @@ class GenesisEngine:
                 maxvolume=config.tet_max_volume_m3 if not shell else -1,
                 nobisect=shell or config.tet_max_volume_m3==-1),material=material)
             vertices=self.entity.init_positions.detach().cpu().numpy().reshape(-1,3)
+            floor_height=0.
+            if not shell and config.contact_mode!='none':
+                # Leave the contact barrier clear for assets resting at z=0.
+                floor_height=min(0.,float(vertices[:,2].min())-config.contact_d_hat_m)
+            floor=self.scene.add_entity(gs.morphs.Plane(pos=(0.,0.,floor_height)),
+                material=gs.materials.Rigid(coup_friction=m.self_friction))
             self._positions=vertices.copy()
             triangles=self.entity.surface_triangles
             self.elements=np.asarray(triangles if shell else self.entity.elems,dtype=np.int64).copy()
@@ -59,13 +65,17 @@ class GenesisEngine:
             if any(i<0 or i>=len(self.surface_ids) for i in config.pins):raise ValueError('固定点编号超出表面顶点范围')
             self.config.pins=sorted(set(config.pins))
             self.force=np.zeros((len(vertices),3),dtype=np.float64)
+            self._prepare_force_surface()
             self.set_forces(config.forces)
             self.mesh_info=dict(simulation_vertices=len(vertices),surface_vertices=len(self.surface_ids),
                 tetrahedra=0 if shell else len(self.entity.elems),tetrahedralization='none' if shell else 'Genesis / TetGen')
             self._attach_ipc_inputs()
+            if floor_height!=0.:self._position_ipc_ground(floor,floor_height)
             if config.contact_mode=='no_self':self._disable_self_contact()
             elif config.contact_mode=='ground_only':self._ground_only_contacts()
             self.scene.build()
+            if not self.scene.sim.coupler._ipc_world.is_valid():
+                raise RuntimeError('IPC 场景初始化失败，请查看后端日志')
             if config.step_mode=='libuipc' and self.scene.sim.substeps!=1:
                 raise RuntimeError('直接 IPC 步进仅支持一个子步')
         except Exception:
@@ -195,6 +205,7 @@ class GenesisEngine:
         self.elements=np.vstack([block['elements'] for block in blocks]) if blocks and len(kinds)==1 else np.empty((0,4),np.int64)
         self.element_material_ids=np.concatenate([block['material_ids'] for block in blocks]) if len(self.elements) else np.empty(0,np.int32)
         self.force=np.zeros_like(self._positions)
+        self._prepare_force_surface()
         self.mesh_info=dict(simulation_vertices=offset,surface_vertices=len(self.surface_ids),
             tetrahedra=sum(len(b['elements']) for b in blocks if b['kind']=='tetrahedron'),
             shell_triangles=sum(len(b['elements']) for b in blocks if b['kind']=='triangle'),
@@ -317,6 +328,20 @@ class GenesisEngine:
             self.fem_preconditioner_fallback_reason=reason
             gs.logger.warning(reason+'；自动使用 diag 预条件器')
 
+    def _position_ipc_ground(self,floor,height):
+        # Genesis can construct its IPC half-plane from the geom-local pose.
+        # Match the rigid plane's world height before World.init runs.
+        import uipc
+        c=self.scene.sim.coupler
+        original=c._register_contact_pairs
+        name=f'rigid_plane_{floor.geoms[0].idx}_0'
+        def register(c):
+            original()
+            plane=c._ipc_objects.find(name)[0]
+            geometry=c._ipc_scene.geometries().find(plane.geometries().ids()[0])[0].geometry()
+            uipc.view(geometry.instances().find('P')).reshape(-1,3)[:,2]=height
+        c._register_contact_pairs=MethodType(register,c)
+
     def _disable_self_contact(self):
         # Run after Genesis registers pairs, before libuipc World.init().
         c=self.scene.sim.coupler
@@ -351,36 +376,61 @@ class GenesisEngine:
         if shear is None:raise RuntimeError('原生薄壳缺少 mu 属性，无法设置剪切刚度，需要更新适配')
         uipc.view(shear)[:]=self.config.material.shear_stiffness_n_m
 
+    def _prepare_force_surface(self):
+        self._force_reference=np.array(self._positions,dtype=np.float64,copy=True)
+        self._force_areas=surface_vertex_areas(self._force_reference,self.surface_ids[self.faces])
+
+    def _force_values(self,forces,body):
+        values=np.zeros_like(self._force_reference)
+        pinned=np.zeros(len(values),dtype=bool)
+        if body is None:
+            pinned[self.surface_ids[self.config.pins]]=True
+        for force in forces:
+            if body is not None:
+                span=self._body_slices[body]
+                if force.vertex>=span.stop-span.start:raise ValueError('Invalid FEM force vertex IDs')
+                vertex=span.start+force.vertex
+            else:
+                if force.vertex>=len(self.surface_ids):raise ValueError('受力点编号超出表面顶点范围')
+                vertex=self.surface_ids[force.vertex]
+                span=None
+                if force.radius_m and getattr(self,'_usd',None) is not None:
+                    span=next(s for s in self._body_slices.values() if s.start<=vertex<s.stop)
+            surface=self.surface_ids
+            if force.radius_m and span is not None:
+                surface=surface[(surface>=span.start)&(surface<span.stop)]
+            add_force(values,self._force_reference,self._force_areas,surface,pinned,
+                      vertex,np.asarray(force.vector),force.radius_m)
+        if not np.isfinite(values).all():raise ValueError('合力必须是有限数')
+        return values
+
     def set_forces(self,forces,body=None):
         forces=[Force.model_validate(f) for f in forces]
-        if getattr(self,'_usd',None) is not None:
+        is_usd=getattr(self,'_usd',None) is not None
+        values=self._force_values(forces,body if is_usd else None)
+        if is_usd:
             if body is not None:
-                self._usd.set_forces(body,np.asarray([f.vertex for f in forces],np.int64),
-                    np.asarray([f.vector for f in forces],float).reshape(-1,3))
+                local=values[self._body_slices[body]]
+                active=np.flatnonzero(np.any(local!=0,axis=1))
+                self._usd.set_forces(body,active,local[active])
             else:
-                ids=[f.vertex for f in forces]
-                if any(i>=len(self.surface_ids) for i in ids):raise ValueError('受力点编号超出表面顶点范围')
-                values=np.zeros_like(self._positions)
-                if forces:np.add.at(values,self.surface_ids[ids],[f.vector for f in forces])
-                values[self.surface_ids[self.config.pins]]=0
+                updates=[]
                 for path,span in self._body_slices.items():
                     local=values[span]
+                    active=np.flatnonzero(np.any(local!=0,axis=1))
                     if path in self._usd._forces:
                         if path in self.drive_nodes:
-                            if np.any(local):raise ValueError('夹持物体请通过set_position_targets驱动')
-                            continue
-                        active=np.flatnonzero(np.any(local!=0,axis=1))
-                        self._usd.set_forces(path,active,local[active])
-                    elif np.any(local):raise NotImplementedError('当前点力接口适用于FEM，ABD点力需单独映射')
+                            if len(active):raise ValueError('夹持物体请通过set_position_targets驱动')
+                        else:
+                            updates.append((path,active,local[active]))
+                    elif len(active):raise NotImplementedError('当前点力接口适用于FEM，ABD点力需单独映射')
+                for path,active,vectors in updates:
+                    self._usd.set_forces(path,active,vectors)
                 self.config.forces=forces
             return self.state()
-        ids=[f.vertex for f in forces]
-        if any(i>=len(self.surface_ids) for i in ids):raise ValueError('受力点编号超出表面顶点范围')
-        force=np.zeros_like(self.force)
-        if forces:np.add.at(force,self.surface_ids[ids],[f.vector for f in forces])
-        if not np.isfinite(force).all():raise ValueError('合力必须是有限数')
-        force[self.surface_ids[self.config.pins]]=0
-        self.force=force;self.force_flags=np.any(force!=0,axis=1).astype(np.int32);self.config.forces=forces
+        self.force=values
+        self.force_flags=np.any(values!=0,axis=1).astype(np.int32)
+        self.config.forces=forces
         return self.state()
 
     def step(self,*,snapshot=True):

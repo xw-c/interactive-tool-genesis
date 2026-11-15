@@ -48,8 +48,9 @@ def run_volume(plastic=False,yield_percent=10.,hardening=0.,steps=240):
     OUT.mkdir(parents=True,exist_ok=True)
     mesh=OUT/'block.obj';box=trimesh.creation.box(extents=(.05,.05,.05))
     box.apply_translation([0,0,.3]);box.export(mesh)
+    # Resolve the imposed stretch before elastic recovery in the same step.
     cfg=Setup(mesh=str(mesh.relative_to(OUT.parents[1])),body_type='volume',gravity=(0,0,0),
-        tet_max_volume_m3=1e-6,contact_d_hat_m=1e-5,
+        dt=.005,tet_max_volume_m3=1e-6,contact_d_hat_m=1e-5,
         material=Material(youngs_modulus_pa=5000,poisson_ratio=.45,density_kg_m3=1050,
             volume_plasticity=plastic,volume_yield_strain_percent=yield_percent,
             volume_plastic_hardening=hardening))
@@ -75,7 +76,7 @@ def run_volume(plastic=False,yield_percent=10.,hardening=0.,steps=240):
                 uipc.view(state.vertices().find('velocity'))[:]=0.
                 accessor.copy_from(state)
             engine.step()
-            x=engine.entity.get_state().pos.detach().cpu().numpy().reshape(-1,3)
+            x=engine.get_simulation_positions()
             stretches.append(np.linalg.svd(reference@(x-x.mean(axis=0)),compute_uv=False))
             surface.append(x[engine.surface_ids].copy())
             min_j=min(min_j,float(np.min(determinants(x)/rest_det)))

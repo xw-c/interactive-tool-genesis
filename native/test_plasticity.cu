@@ -26,8 +26,19 @@ __host__ __device__ double verify_material() {
     auto rotated=plastic_trial(R*F,mu,lambda,alpha,yield,hardening);
     plastic_derivatives(R*F,mu,lambda,rotated,Pr,nullptr);
     error=fmax(error,(Pr-R*P).norm()/mu);
-    Matrix3x3 bad=F;bad.col(0)*=-1;
-    if(plastic_trial(bad,mu,lambda,alpha,yield,hardening).valid)error=1e10;
+    for(int i=0;i<3;++i) {
+        Matrix3x3 tet=Matrix3x3::Identity();
+        tet(0,0)=-0.2*i;
+        const auto result=plastic_trial(tet,mu,lambda,0,yield,0);
+        if(!result.valid || !result.active || !isfinite(result.energy))return 1e10;
+        Matrix3x3 force;Matrix9x9 tangent;
+        plastic_derivatives(tet,mu,lambda,result,force,&tangent);
+        // The negative energy gradient increases signed volume across J=0.
+        if(!(force(0,0)<0) || !isfinite(tangent.squaredNorm()))return 1e10;
+        Matrix3x3 history=Matrix3x3::Identity();Float accumulated=0;
+        if(!plastic_commit(tet,history,accumulated,mu,lambda,yield,0))return 1e10;
+        error=fmax(error,fabs(history.determinant()-1));
+    }
     return error;
 }
 __global__ void gpu_check(double* result) {
@@ -40,11 +51,11 @@ __global__ void gpu_check(double* result) {
     for(int i=0;i<81;++i)result[10+i]=K.data()[i];
 }
 
-bool finite_difference(Matrix3x3 F,double mu,double lambda,double alpha,double y,double H) {
+bool finite_difference(Matrix3x3 F,double mu,double lambda,double alpha,double y,double H,double eps=2e-6) {
     auto r=plastic_trial(F,mu,lambda,alpha,y,H);
     if(!r.valid){std::printf("local solve failed\n");return false;}
     Matrix3x3 P;Matrix9x9 K;plastic_derivatives(F,mu,lambda,r,P,&K);
-    double eg=0,eh=0,eps=2e-6;
+    double eg=0,eh=0;
     for(int col=0;col<9;++col) {
         Matrix3x3 plus=F,minus=F;plus.data()[col]+=eps;minus.data()[col]-=eps;
         auto rp=plastic_trial(plus,mu,lambda,alpha,y,H),rm=plastic_trial(minus,mu,lambda,alpha,y,H);
@@ -82,6 +93,17 @@ int main() {
     pass &= finite_difference(F,2000,10000,0,200,500);
     F(1,1)+=1e-9;pass &= finite_difference(F,2000,10000,0,200,500);
     F.setIdentity();F(0,1)=.7;pass &= finite_difference(F,2000,10000,0,200,500);
+    // Compression exercises both return branches.
+    F<<.12,.17,.02,.01,1.,.04,0,.02,1.1;
+    pass &= finite_difference(F,2000,10000,0,200,500);
+    pass &= finite_difference(F,2000,10000,0,1e8,0);
+    // Differentiation crosses the flat state and samples the inverted branch.
+    F.setIdentity();F(0,0)=0;
+    pass &= finite_difference(F,2000,10000,0,200,0);
+    // The strengthless regularization produces a narrow transition around rank loss.
+    pass &= finite_difference(F,2000,10000,0,0,0,1e-10);
+    F(0,0)=-.25;F(1,2)=.23;
+    pass &= finite_difference(F,2000,10000,0,200,500);
     // Stress-based yield and hardening consistency through cyclic non-coaxial history.
     Matrix3x3 inverse=Matrix3x3::Identity();double alpha=0;
     for(int i=0;i<120;++i) {

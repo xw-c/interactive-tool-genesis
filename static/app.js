@@ -130,6 +130,7 @@ function renderState(s){
 }
 async function connect(){
  try{const data=await api.getProject();buildForm(data);fillConfig(data.config);
+  $('force-radius-mm').value=1000*data.default_force_radius_m;
   await api.connect(renderState,on=>{$('led').classList.toggle('on',on);$('connection').textContent=on?'本地服务已连接':'连接已断开';if(!on){pause();status('服务已断开，请重启后刷新',true);}});
   await configure(data.config);
  }catch(e){status(e.message,true);}
@@ -181,9 +182,59 @@ $('pin').onclick=async()=>{
  try{const s=await api.setPins([...next]);selected=null;fillConfig(s.config);updateMarks();status('固定点已更新，仿真已重置');}catch(e){status(e.message,true);}finally{setBusy(false);updateSelection();}
 };
 $('clear-selection').onclick=()=>{selected=null;updateMarks();};
-async function syncForces(next){try{await api.setForces(next);forces=next;config.forces=structuredClone(next);renderForces();updateMarks();status('点力已更新');}catch(e){status(e.message,true);renderForces();}}
-function renderForces(){$('force-count').textContent=forces.length;const list=$('forces');list.replaceChildren();if(!forces.length){list.innerHTML='<div class="empty">尚未添加外力</div>';return;}forces.forEach((f,index)=>{const card=document.createElement('div');card.className='force-card';const content=document.createElement('div');const title=document.createElement('strong');title.textContent='顶点 #'+f.vertex;title.style.cursor='pointer';title.onclick=()=>{selected=f.vertex;updateMarks();};const vec=document.createElement('div');vec.className='vector';for(let axis=0;axis<3;axis++){const l=document.createElement('label');l.textContent=['Fx','Fy','Fz'][axis];const input=document.createElement('input');Object.assign(input,{type:'number',value:f.vector[axis],step:'any'});input.onchange=()=>{if(!input.checkValidity()||input.value===''){status('请填写有限的力分量',true);return;}const next=structuredClone(forces);next[index].vector[axis]=+input.value;syncForces(next);};l.append(input);vec.append(l);}const magnitude=document.createElement('span');magnitude.textContent='|F| = '+Math.hypot(...f.vector).toExponential(2)+' N';content.append(title,vec,magnitude);const remove=document.createElement('button');remove.textContent='×';remove.title='删除力';remove.onclick=()=>syncForces(forces.filter((_,i)=>i!==index));card.append(content,remove);list.append(card);});}
-$('add-force').onclick=()=>{if(busy||selected===null||pins.includes(selected))return;const inputs=['fx','fy','fz'].map($);if(inputs.some(i=>!i.checkValidity()||i.value===''))return status('请填写有效的力分量',true);const vector=inputs.map(i=>+i.value);if(vector.every(v=>v===0))return status('请输入非零力矢量',true);syncForces([...forces,{vertex:selected,vector}]);};
+async function syncForces(next){try{await api.setForces(next);forces=next;config.forces=structuredClone(next);renderForces();updateMarks();status('外力已更新');}catch(e){status(e.message,true);renderForces();}}
+function renderForces(){
+ $('force-count').textContent=forces.length;
+ const list=$('forces');
+ list.replaceChildren();
+ if(!forces.length){list.innerHTML='<div class="empty">尚未添加外力</div>';return;}
+ forces.forEach((f,index)=>{
+  const card=document.createElement('div');card.className='force-card';
+  const content=document.createElement('div');
+  const title=document.createElement('strong');
+  title.textContent='中心顶点 #'+f.vertex;
+  title.style.cursor='pointer';
+  title.onclick=()=>{selected=f.vertex;updateMarks();};
+  const numberField=(label,value,update,min)=>{
+   const field=document.createElement('label');field.textContent=label;
+   const input=document.createElement('input');
+   Object.assign(input,{type:'number',value,step:'any',required:true});
+   if(min!==undefined)input.min=min;
+   input.onchange=()=>{
+    if(!input.checkValidity()){status('请填写有效的'+label,true);return;}
+    const next=structuredClone(forces);
+    update(next[index],input.valueAsNumber);
+    syncForces(next);
+   };
+   field.append(input);
+   return field;
+  };
+  const vec=document.createElement('div');vec.className='vector';
+  for(let axis=0;axis<3;axis++){
+   vec.append(numberField(['Fx','Fy','Fz'][axis],f.vector[axis],(entry,value)=>entry.vector[axis]=value));
+  }
+  const radius=numberField('施力半径 / mm',1000*(f.radius_m??0),(entry,value)=>entry.radius_m=value/1000,0);
+  const magnitude=document.createElement('span');
+  magnitude.textContent='|F| = '+Math.hypot(...f.vector).toExponential(2)+' N';
+  content.append(title,vec,radius,magnitude);
+  const remove=document.createElement('button');
+  remove.textContent='×';
+  remove.title='删除力';
+  remove.onclick=()=>syncForces(forces.filter((_,i)=>i!==index));
+  card.append(content,remove);
+  list.append(card);
+ });
+}
+$('add-force').onclick=()=>{
+ if(busy||selected===null||pins.includes(selected))return;
+ const inputs=['fx','fy','fz'].map($);
+ if(inputs.some(i=>!i.checkValidity()||i.value===''))return status('请填写有效的力分量',true);
+ const radius=$('force-radius-mm');
+ if(!radius.checkValidity()||radius.value==='')return status('请填写有效的施力半径',true);
+ const vector=inputs.map(i=>i.valueAsNumber);
+ if(vector.every(v=>v===0))return status('请输入非零力矢量',true);
+ syncForces([...forces,{vertex:selected,vector,radius_m:radius.valueAsNumber/1000}]);
+};
 $('clear-forces').onclick=()=>syncForces([]);
 function download(name,text,type){const url=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('export').onclick=async()=>{try{const s=await api.snapshot();download('shell-config.json',JSON.stringify(s.config,null,2),'application/json');status('已导出当前生效配置');}catch(e){status(e.message,true);}};

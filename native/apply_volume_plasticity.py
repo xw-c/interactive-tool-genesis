@@ -15,6 +15,12 @@ def patch_step_commit(text):
     replacements = [
         ('    constexpr bool AbortOnException = uipc::RUNTIME_CHECK;\n\n    auto pipeline = [&]() noexcept(AbortOnException)',
          '    auto pipeline = [&]()'),
+        ('Float E0 = m_line_searcher->compute_energy(true);  // initial energy',
+         'Float E0 = m_line_searcher->compute_energy(true);\n'
+         '                    if(!std::isfinite(E0))\n'
+         '                        throw SimEngineException("Invalid initial line-search energy; reset this simulation");'),
+        ('                        if(converged)\n                            break;',
+         '                        if(converged && std::isfinite(E))\n                            break;'),
         ('                    // Check Line Search Iteration: report warnings or throw exceptions if needed',
          '                    if(line_search_iter >= m_line_searcher->max_iter() || !std::isfinite(last_E))\n'
          '                        throw SimEngineException("Line search failed; reset this simulation");\n'
@@ -30,6 +36,13 @@ def patch_step_commit(text):
         if text.count(old)!=1:raise RuntimeError('Unsupported step-commit source layout: '+old[:80])
         text=text.replace(old,new)
     return text
+
+def patch_line_search_energy(text):
+    """Let backtracking handle a rejected constitutive trial without a CUDA assertion."""
+    old='        E = info.m_energy.value();'
+    if text.count(old)!=1:raise RuntimeError('Unsupported line-search energy source layout')
+    return text.replace(old, old+'\n        if(std::isinf(E) && E>0) return E;')
+
 
 def apply(root):
     validate_overlay(HERE)  # Before writing anything to the source snapshot.
@@ -123,6 +136,10 @@ extern "C" IPC_PLASTIC_EXPORT int interactive_ipc_step_commit_version() { return
     text=text.replace('auto k_min = m_newton_min_iter->view()[0];',
         'auto k_min = world().scene().config().find<IndexT>("newton/semi_implicit/K_min")->view()[0];')
     advance.write_text(patch_step_commit(text),encoding='utf-8')
+    line_searcher=root/'src/backends/cuda/line_search/line_searcher.cu'
+    text=line_searcher.read_text(encoding='utf-8').replace('#include <line_search/line_searcher.h>',
+        '#include <cmath>\n#include <line_search/line_searcher.h>')
+    line_searcher.write_text(patch_line_search_energy(text),encoding='utf-8')
     # CUDA 12 exposes the edge-data signature under _v2; CUDA 13 uses the main name.
     graph=root/'src/backends/cuda/cuda_tool/graph.h'
     text=graph.read_text(encoding='utf-8')

@@ -83,13 +83,12 @@ class PlasticityTests(unittest.TestCase):
                     self.assertEqual(scene.step.call_count,calls)
 
     @unittest.skipUnless(os.environ.get('IPC_VOLUME_GPU_TEST')=='1','Requires the project volume-plasticity backend')
-    def test_native_failure_requires_reset(self):
+    def test_native_build_rejects_failed_warmup(self):
         from unittest.mock import patch
         import benchmarks.plasticity as experiment
         from genesis.engine.couplers.ipc_coupler import coupler
         from app.engine import GenesisEngine
         for key in ('newton/max_iter','line_search/max_iter'):
-            engines=[]
             def failing_engine(config):
                 original=coupler.build_ipc_scene_config
                 def limited(*args,**kwargs):
@@ -98,16 +97,10 @@ class PlasticityTests(unittest.TestCase):
                     cfg[key.split('/')[0]]['max_iter']=0
                     return cfg
                 with patch.object(coupler,'build_ipc_scene_config',limited):
-                    engine=GenesisEngine(config)
-                engines.append(engine)
-                return engine
+                    return GenesisEngine(config)
             with self.subTest(limit=key),patch.object(experiment,'GenesisEngine',failing_engine):
-                with self.assertRaisesRegex(RuntimeError,'IPC .*重置'):
+                with self.assertRaisesRegex(RuntimeError,'IPC 场景初始化失败'):
                     experiment.run_volume(True,steps=1)
-                engine=engines[0]
-                self.assertEqual(engine.frame,0);self.assertEqual(engine.time,0.)
-                self.assertTrue(engine._failed)
-                with self.assertRaisesRegex(RuntimeError,'重置'):engine.step()
 
     @unittest.skipUnless(os.environ.get('IPC_GPU_TEST')=='1','Set IPC_GPU_TEST=1 for CUDA load/unload experiments')
     def test_shell_residual_and_elastic_control(self):
@@ -125,6 +118,51 @@ class PlasticityTests(unittest.TestCase):
         # Rebuilding an elastic scene after yielding must not inherit plastic state.
         r,_,_=run_hinge(False,steps=160)
         self.assertLess(abs(r['final_angle_deg']),.01)
+
+    @unittest.skipUnless(os.environ.get('IPC_VOLUME_GPU_TEST')=='1','Requires the project volume-plasticity backend')
+    def test_volume_recovers_from_an_inverted_tetrahedron(self):
+        import numpy as np
+        from app.engine import GenesisEngine
+        import uipc
+        from uipc.core import FiniteElementStateAccessorFeature
+
+        with tempfile.TemporaryDirectory() as folder:
+            mesh=Path(folder)/'tetrahedron.obj'
+            mesh.write_text(
+                'v 0 0 0\nv .05 0 0\nv 0 .05 0\nv 0 0 .05\n'
+                'f 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n', encoding='utf-8')
+            engine=GenesisEngine(Setup(mesh=str(mesh),body_type='volume',dt=.001,contact_mode='none',
+                gravity=(0,0,0),material=Material(volume_plasticity=True)))
+            try:
+                tets=engine.elements
+                rest=engine.get_simulation_positions()
+
+                def determinants(positions):
+                    points=positions[tets]
+                    return np.linalg.det(points[:,1:]-points[:,:1])
+
+                world=engine.scene.sim.coupler._ipc_world
+                accessor=world.features().find(FiniteElementStateAccessorFeature)
+                state=accessor.create_geometry()
+                for name in ('position','velocity'):
+                    if state.vertices().find(name) is None:
+                        state.vertices().create(name,np.zeros(3))
+                inverted=rest * [-.35,1.,1.]
+                uipc.view(state.positions()).reshape(-1,3)[:]=inverted
+                uipc.view(state.vertices().find('velocity'))[:]=0.
+                accessor.copy_from(state)
+                rest_det=determinants(rest)
+                accessor.copy_to(state)
+                seeded=uipc.view(state.positions()).reshape(-1,3)
+                self.assertLess(np.min(determinants(seeded)/rest_det),0)
+                history=[]
+                for _ in range(100):
+                    engine.step(snapshot=False)
+                    history.append(np.min(determinants(engine.get_simulation_positions())/rest_det))
+                self.assertTrue(np.isfinite(history).all())
+                self.assertGreater(min(history[-10:]),0, msg=f'Final signed volume ratios: {history[-10:]}')
+            finally:
+                engine.close()
 
     @unittest.skipUnless(os.environ.get('IPC_VOLUME_GPU_TEST')=='1','Requires the project volume-plasticity backend')
     def test_volume_residual_and_elastic_control(self):

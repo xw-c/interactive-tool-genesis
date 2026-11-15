@@ -5,6 +5,7 @@
 // See native/README.md for the complete specialization and its limitations.
 #include "snk1.h"
 #include <cmath>
+#include <limits>
 
 namespace uipc::backend::cuda {
 struct PlasticResult {
@@ -16,6 +17,7 @@ struct PlasticResult {
     bool active=false, valid=true;
 };
 using Matrix3x2=Eigen::Matrix<Float,3,2>;
+
 __host__ __device__ __forceinline__ Matrix3x2 plastic_basis() {
     Matrix3x2 B;
     B << 0.7071067811865475244,0.4082482904638630164,
@@ -63,10 +65,20 @@ __host__ __device__ __forceinline__ PlasticResult plastic_trial(const Matrix3x3&
     Float mu,Float lambda,Float alpha,Float yield,Float hardening) {
     PlasticResult result;
     const Float J=F.determinant();
-    if(!(J>1e-12) || !isfinite(J)){result.valid=false;result.energy=1e30;return result;}
+    constexpr Float invalid_energy=std::numeric_limits<Float>::infinity();
+    if(!isfinite(J) || !isfinite(F.squaredNorm())) {
+        result.valid=false;result.energy=invalid_energy;return result;
+    }
     plastic_eigen(F.transpose()*F,result.eigenvalues,result.V);
-    for(int i=0;i<3;++i)if(!(result.eigenvalues[i]>1e-24)||!isfinite(result.eigenvalues[i])){result.valid=false;result.energy=1e30;return result;}
+    if(result.eigenvalues.minCoeff() <= 1e-12 * result.eigenvalues.maxCoeff()) {
+        // Recover small squared stretches without cancellation in the spectrum of F^T F.
+        const Matrix3x3 stretched=F*result.V;
+        for(int i=0;i<3;++i)result.eigenvalues[i]=stretched.col(i).squaredNorm();
+    }
     const Float k=sqrt(2.0/3.0),current_yield=yield+hardening*alpha;
+    // A completely strengthless material has no finite local minimizer at rank loss.
+    // Add a small quadratic cost on each increment in this parameter limit.
+    const Float increment_modulus=yield==0 && hardening==0 ? 1e-6*mu : hardening;
     const Matrix3x2 B=plastic_basis();
     const Vector2 driving=mu*B.transpose()*result.eigenvalues;
     const Float equivalent=driving.norm()/k;
@@ -77,21 +89,22 @@ __host__ __device__ __forceinline__ PlasticResult plastic_trial(const Matrix3x3&
     }
     // Strictly convex 2D local minimization. History is not changed here.
     result.active=true;
-    const Float estimate=(equivalent-current_yield)/(3*mu+hardening);
-    const Vector3 log_stretch=0.5*result.eigenvalues.array().log().matrix();
+    const Float estimate=(equivalent-current_yield)/(3*mu+increment_modulus);
+    // Only the starting guess needs log stretches. The potential uses squared stretches.
+    const Vector3 log_stretch=0.5*result.eigenvalues.array().max(1e-24).log().matrix();
     const Float relaxed=(B.transpose()*log_stretch).norm();
     Vector2 z=fmax(fmin(estimate/k,relaxed),1e-12)*driving.normalized();
     bool converged=false;
     for(int iteration=0;iteration<64;++iteration) {
         Vector2 g;Matrix2x2 H;
-        const Float value=plastic_local(result.eigenvalues,z,mu,current_yield,hardening,&g,&H);
+        const Float value=plastic_local(result.eigenvalues,z,mu,current_yield,increment_modulus,&g,&H);
         if(g.norm()<=2e-11*scale){converged=true;break;}
         if(!(H.determinant()>0)||!isfinite(H.determinant()))break;
         const Vector2 step=-plastic_inverse2(H)*g;
         Float length=1;bool accepted=false;
         for(int line=0;line<40;++line) {
             Vector2 next=z+length*step;
-            const Float candidate=plastic_local(result.eigenvalues,next,mu,current_yield,hardening,nullptr,nullptr);
+            const Float candidate=plastic_local(result.eigenvalues,next,mu,current_yield,increment_modulus,nullptr,nullptr);
             if(next.norm()>1e-18 && isfinite(candidate)
                 && candidate<=value+1e-4*length*g.dot(step)+2e-15*scale){z=next;accepted=true;break;}
             length*=0.5;
@@ -99,16 +112,16 @@ __host__ __device__ __forceinline__ PlasticResult plastic_trial(const Matrix3x3&
         if(!accepted)break;
     }
     Vector2 gradient;
-    plastic_local(result.eigenvalues,z,mu,current_yield,hardening,&gradient,&result.local_hessian);
-    if(!isfinite(gradient.norm()) || !(result.local_hessian.determinant()>0) || (!converged && gradient.norm()>2e-9*scale)){result.valid=false;result.energy=1e30;return result;}
+    plastic_local(result.eigenvalues,z,mu,current_yield,increment_modulus,&gradient,&result.local_hessian);
+    if(!isfinite(gradient.norm()) || !(result.local_hessian.determinant()>0) || (!converged && gradient.norm()>2e-9*scale)){result.valid=false;result.energy=invalid_energy;return result;}
     result.z=z;result.plastic_log=B*z;result.increment=k*z.norm();
     const Vector3 returned=(result.eigenvalues.array()*(-2*result.plastic_log.array()).exp()).matrix();
     const Vector3 stress=mu*(returned.array()-returned.mean()).matrix();
-    result.yield_residual=stress.norm()/k-(current_yield+hardening*result.increment);
+    result.yield_residual=stress.norm()/k-(current_yield+increment_modulus*result.increment);
     const Float j=J-1;
     result.energy=0.5*mu*(returned.sum()-3)+0.5*lambda*j*j-mu*j
-        +current_yield*result.increment+0.5*hardening*result.increment*result.increment;
-    if(!isfinite(result.energy)) {result.valid=false;result.energy=1e30;}
+        +current_yield*result.increment+0.5*increment_modulus*result.increment*result.increment;
+    if(!isfinite(result.energy)) {result.valid=false;result.energy=invalid_energy;}
     return result;
 }
 // Derivatives of the minimized incremental potential, NOT the old elastic
@@ -122,17 +135,18 @@ __host__ __device__ __forceinline__ void plastic_derivatives(const Matrix3x3& F,
     }
     const Vector3 c=r.eigenvalues,ratio=(-2*r.plastic_log.array()).exp().matrix();
     const Float J=F.determinant(),beta=lambda*(J-1)-mu;
-    Vector3 g=0.5*mu*ratio;
-    for(int i=0;i<3;++i)g[i]+=beta*J/(2*c[i]);
+    // Keep the signed determinant energy in F-space. Since the plastic update
+    // is isochoric, this term has no coupling to the plastic return. Cofactors
+    // give the volumetric stress and tangent even at a singular F.
+    const Vector3 g=0.5*mu*ratio;
     const Matrix3x3 G=r.V*g.asDiagonal()*r.V.transpose();
-    P=2*F*G;
+    P=2*F*G+beta*sym::stable_neo_hookean_3d::cofactor(F);
     if(!hessian)return;
     const Matrix3x2 cross=-mu*ratio.asDiagonal()*plastic_basis();
-    Matrix3x3 K=-cross*plastic_inverse2(r.local_hessian)*cross.transpose();
-    for(int i=0;i<3;++i)for(int j=0;j<3;++j) {
-        K(i,j)+=(lambda*J*J+beta*J)/(4*c[i]*c[j]);
-        if(i==j)K(i,j)-=beta*J/(2*c[i]*c[i]);
-    }
+    const Matrix3x3 K=-cross*plastic_inverse2(r.local_hessian)*cross.transpose();
+
+    sym::stable_neo_hookean_3d::ddEddVecF(*hessian,mu,lambda,F);
+    hessian->diagonal().array()-=mu;
     for(int col=0;col<9;++col) {
         Matrix3x3 dF=Matrix3x3::Zero();dF.data()[col]=1;
         const Matrix3x3 dC=r.V.transpose()*(F.transpose()*dF+dF.transpose()*F)*r.V;
@@ -144,7 +158,7 @@ __host__ __device__ __forceinline__ void plastic_derivatives(const Matrix3x3& F,
             dG(i,j)=dG(j,i)=divided*dC(i,j);
         }
         const Matrix3x3 dP=2*dF*G+2*F*r.V*dG*r.V.transpose();
-        for(int row=0;row<9;++row)(*hessian)(row,col)=dP.data()[row];
+        for(int row=0;row<9;++row)(*hessian)(row,col)+=dP.data()[row];
     }
     *hessian=(0.5*(*hessian+hessian->transpose())).eval();
 }

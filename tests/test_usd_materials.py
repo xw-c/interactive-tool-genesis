@@ -143,6 +143,23 @@ class UsdNativeMaterialTests(unittest.TestCase):
             try:self.check_native(engine,False)
             finally:engine.close()
 
+    def test_force_radius_stays_on_selected_body(self):
+        with tempfile.TemporaryDirectory() as folder:
+            engine=self.create_engine(folder)
+            try:
+                volume=engine.bodies['/volume']
+                vector=[.05,-.025,0.]
+                engine.set_forces([dict(vertex=volume['vertex_start'],vector=vector,radius_m=1.)])
+                forces=engine._usd._forces['/volume']
+                self.assertGreater(np.count_nonzero(np.linalg.norm(forces,axis=1)),1)
+                np.testing.assert_allclose(forces.sum(axis=0),vector)
+                np.testing.assert_array_equal(engine._usd._forces['/shell'],0)
+                engine.set_forces([dict(vertex=0,vector=vector,radius_m=0.)],body='/volume')
+                forces=engine._usd._forces['/volume']
+                np.testing.assert_allclose(forces[0],vector)
+                np.testing.assert_array_equal(forces[1:],0)
+            finally:engine.close()
+
     @unittest.skipUnless(os.environ.get('IPC_VOLUME_GPU_TEST')=='1','Requires the existing plasticity backend')
     def test_usd_only_volume_and_shell_plasticity(self):
         with tempfile.TemporaryDirectory() as folder:

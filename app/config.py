@@ -2,6 +2,8 @@
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, field_serializer, field_validator, model_serializer
 
+DEFAULT_FORCE_RADIUS_M = .012
+
 class Input(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
 
@@ -23,7 +25,9 @@ class Material(Input):
 
 class Force(Input):
     vertex: int=Field(ge=0)
-    vector: tuple[float,float,float]
+    vector: tuple[float,float,float]=Field(title='总力 / N',description='世界坐标中的总力分量 [Fx, Fy, Fz]，单位为牛顿。')
+    radius_m: float=Field(0.,ge=0,title='施力半径 / m',
+        description='参考表面上的施力半径，单位为米。0 表示全部力作用于指定节点。')
 
 class MaterialRegion(Input):
     name: str=''

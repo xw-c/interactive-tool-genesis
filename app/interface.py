@@ -8,7 +8,7 @@ import uuid
 import zipfile
 from importlib.metadata import version
 from pathlib import Path
-from .config import Setup, Material
+from .config import DEFAULT_FORCE_RADIUS_M, Setup, Material
 from .mesh import ROOT, load_mesh, contact_check, asset_path
 from .engine import GenesisEngine
 
@@ -44,6 +44,7 @@ def project_info():
         details=validate_asset(config)
     return dict(details,config=config.model_dump(mode='json'),
         material_schema=Material.model_json_schema(),
+        default_force_radius_m=DEFAULT_FORCE_RADIUS_M,
         genesis_version=version('genesis-world'),solver='ipc',device='cuda',
         models=dict(shell='StrainLimitingBaraffWitkinShell',volume='StableNeoHookean',
             bending_model=[dict(value='DiscreteShellBending',label='DiscreteShellBending'),dict(value=None,label='无弯曲能')]))
